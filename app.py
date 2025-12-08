@@ -34,6 +34,30 @@ BORDER_COLOR = "#E5E7EB"
 st.markdown(
     f"""
     <style>
+    /* Force light theme regardless of device settings */
+    :root {{
+        color-scheme: light !important;
+    }}
+    html, body, .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stHeader"],
+    [data-testid="stSidebar"],
+    .main, .block-container {{
+        background-color: #ffffff !important;
+        color: {TEXT_PRIMARY} !important;
+    }}
+    @media (prefers-color-scheme: dark) {{
+        :root {{ color-scheme: light !important; }}
+        html, body, .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stHeader"],
+        [data-testid="stSidebar"],
+        .main, .block-container {{
+            background-color: #ffffff !important;
+            color: {TEXT_PRIMARY} !important;
+        }}
+    }}
+
     /* ===== TYPOGRAPHY ===== */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
     
@@ -533,6 +557,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 # ---------------------------------------------------------
 # Grundkonfiguration & Branding
@@ -2588,3 +2613,4 @@ if st.session_state.stage == "results":
         st.info("ℹ️ Nicht genug Daten für Peer-Vergleich verfügbar.")
 
     render_footer()
+
