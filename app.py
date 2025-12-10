@@ -9,6 +9,15 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 import json
+from io import BytesIO
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import simpleSplit  # for wrapping
+except ImportError:
+    A4 = None
+    canvas = None
+    simpleSplit = None
 
 
 # ---------------------------------------------------------
@@ -22,14 +31,45 @@ WARNING_COLOR = "#F59E0B"
 DANGER_COLOR = "#EF4444"
 TEXT_PRIMARY = "#1F2937"
 TEXT_SECONDARY = "#6B7280"
-TEXT_BUTTON = "#FFFFFF"  # Weisse Schrift für Buttons
+TEXT_BUTTON = "#FFFFFF"  # White text for buttons
 BACKGROUND_LIGHT = "#FFFFFF"
 BACKGROUND_SUBTLE = "#F9FAFB"
 BORDER_COLOR = "#E5E7EB"
 
+# ---------------------------------------------------------
+# Base Configuration & Branding
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="NeuroRiskAI",
+    page_icon="🧠",
+    layout="centered"
+)
+
+st.markdown(
+    f"""
+    <style>
+    /* Additional styles - does NOT override button styles */
+    .neuro-card {{
+        padding: 1rem 1.25rem;
+        border-radius: 0.75rem;
+        border: 1px solid #e5e7eb;
+        background-color: #f9fafb;
+        margin-bottom: 1rem;
+    }}
+    .neuro-phase-intro {{
+        padding: 1.25rem 1.5rem;
+        border-radius: 0.75rem;
+        border: 1px solid #d1e3f0;
+        background-color: #f2f7fb;
+        margin-bottom: 1rem;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # ---------------------------------------------------------
-# GLOBAL CSS – Professionelles B2C Design
+# GLOBAL CSS – Professional B2C Design
 # ---------------------------------------------------------
 st.markdown(
     f"""
@@ -560,43 +600,12 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# Grundkonfiguration & Branding
-# ---------------------------------------------------------
-st.set_page_config(
-    page_title="NeuroRiskAI",
-    page_icon="🧠",
-    layout="centered"
-)
-
-st.markdown(
-    f"""
-    <style>
-    /* Ergänzende Styles - überschreibt NICHT die Button-Styles */
-    .neuro-card {{
-        padding: 1rem 1.25rem;
-        border-radius: 0.75rem;
-        border: 1px solid #e5e7eb;
-        background-color: #f9fafb;
-        margin-bottom: 1rem;
-    }}
-    .neuro-phase-intro {{
-        padding: 1.25rem 1.5rem;
-        border-radius: 0.75rem;
-        border: 1px solid #d1e3f0;
-        background-color: #f2f7fb;
-        margin-bottom: 1rem;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-# ---------------------------------------------------------
 # HELPER: Render Stepper Progress
 # ---------------------------------------------------------
 def render_stepper(current_phase: str):
     """Render a visual phase stepper (Calm → Boom → Crisis)"""
     phases = ["calm", "boom", "crisis"]
-    labels = {"calm": "Ruhig", "boom": "Boom", "crisis": "Krise"}
+    labels = {"calm": "Calm", "boom": "Boom", "crisis": "Crisis"}
     icons = {"calm": "🌊", "boom": "📈", "crisis": "⚡"}
     
     current_idx = phases.index(current_phase) if current_phase in phases else 0
@@ -662,12 +671,21 @@ def render_feature_tile(icon: str, title: str, description: str):
         </div>
     ''', unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# HELPER: Render Phase Badge
-# ---------------------------------------------------------
+def render_coming_soon_card(title: str, description: str = "Coming soon"):
+    """Unified pink coming-soon card."""
+    st.markdown(
+        f"""
+        <div class="neuro-card" style="border-left: 6px solid #EC4899; background:#fff;">
+          <strong>{title}</strong><br>
+          <span style="color:#EC4899;">{description}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def render_phase_badge(phase: str):
     """Render a colored phase badge"""
-    labels = {"calm": "Ruhige Phase", "boom": "Boom Phase", "crisis": "Krisen Phase"}
+    labels = {"calm": "Calm Phase", "boom": "Boom Phase", "crisis": "Crisis Phase"}
     st.markdown(f'<span class="neuro-badge {phase}">{labels.get(phase, phase)}</span>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------
@@ -691,18 +709,265 @@ def render_footer():
             <p><strong>NeuroRisk AI</strong> – Behavioral Risk Profiling</p>
             <p>Turning emotion into data and compliance into confidence.</p>
             <p style="margin-top: 1rem;">
-                <a href="#">Datenschutz</a> · 
-                <a href="#">Impressum</a> · 
-                <a href="#">Kontakt</a>
+                <a href="#">Privacy</a> · 
+                <a href="#">Imprint</a> · 
+                <a href="#">Contact</a>
             </p>
             <p style="font-size: 0.75rem; margin-top: 1rem; color: #9CA3AF;">
-                © 2025 NeuroRisk AI. Alle Rechte vorbehalten.
+                © 2025 NeuroRisk AI. All rights reserved.
             </p>
         </div>
     ''', unsafe_allow_html=True)
 
+def compute_bias_messages(scores):
+    """Create bias messages with severity levels."""
+    messages = []
+    la = scores.get("loss_aversion_proxy", 0.0)
+    if la > 0.2:
+        messages.append((
+            "info",
+            "🧩 **Loss Aversion:** You behave much more risk-seeking during boom phases than in crises. "
+            "This indicates pronounced loss aversion."
+        ))
+    elif la > 0.05:
+        messages.append((
+            "info",
+            "🧩 **Loss Aversion:** Slight tendency toward loss avoidance in crises – overall moderate."
+        ))
+    else:
+        messages.append((
+            "info",
+            "🧩 **Loss Aversion:** Your risk choices hardly differ between boom and crisis – rather low loss aversion."
+        ))
+
+    herd_score = scores.get("herding_score", 0.0)
+    if herd_score > 70:
+        messages.append((
+            "warning",
+            "👥 **Herding Tendency:** You frequently follow the majority. "
+            "Be careful not to base decisions solely on 'everyone's doing it'."
+        ))
+    elif herd_score > 30:
+        messages.append((
+            "info",
+            "👥 **Herding Tendency:** Moderate tendency to orient yourself toward the majority."
+        ))
+    else:
+        messages.append((
+            "success",
+            "👥 **Herding Tendency:** Low tendency toward herding – you make relatively independent decisions."
+        ))
+
+    disposition = scores.get("disposition")
+    if disposition == "high":
+        messages.append((
+            "warning",
+            "💰 **Disposition Effect:** You tend to realize gains quickly and completely. "
+            "In the long run, this can lead to missing upside potential."
+        ))
+    elif disposition == "medium":
+        messages.append((
+            "info",
+            "💰 **Disposition Effect:** Tendency to sell when in profit – normal, but observable."
+        ))
+    elif disposition == "slight":
+        messages.append((
+            "info",
+            "💰 **Disposition Effect:** Slight tendency to take profits, overall balanced."
+        ))
+    elif disposition == "low":
+        messages.append((
+            "success",
+            "💰 **Disposition Effect:** You let gains run relatively – little tendency to realize prematurely."
+        ))
+
+    recency = scores.get("recency")
+    if recency == "strong negative":
+        messages.append((
+            "warning",
+            "⏳ **Recency Bias:** After short-term losses, you react very defensively. "
+            "This can lead to emotional selling."
+        ))
+    elif recency == "moderate":
+        messages.append((
+            "info",
+            "⏳ **Recency Bias:** Your reaction to short-term losses is moderate."
+        ))
+    elif recency == "resilient_proactive":
+        messages.append((
+            "success",
+            "⏳ **Recency Bias:** You not only stay calm, but also actively use downturns."
+        ))
+    elif recency == "resilient":
+        messages.append((
+            "success",
+            "⏳ **Recency Bias:** Short-term losses seem to hardly dominate your behavior."
+        ))
+
+
+    hindsight = scores.get("hindsight")
+    if hindsight == "high":
+        messages.append((
+            "warning",
+            "🔁 **Hindsight / Regret:** In hindsight, you would clearly choose a more defensive strategy. "
+            "This may indicate high emotional retrospective pressure."
+        ))
+    elif hindsight == "moderate":
+        messages.append((
+            "info",
+            "🔁 **Hindsight / Regret:** You would change some, but not all decisions."
+        ))
+    elif hindsight == "aggressive":
+        messages.append((
+            "info",
+            "🔁 **Hindsight:** In hindsight, you would have been even more aggressive – you accept volatility relatively well."
+        ))
+    elif hindsight == "low":
+        messages.append((
+            "success",
+            "🔁 **Hindsight / Regret:** You would hardly change your strategy in hindsight."
+        ))
+
+    return messages
+
+def generate_results_pdf(demographics, biometrics_df, stress_summary, risk_summary, scores, risk_type):
+    """Render PDF export (sections 1–8) with wrapped text."""
+    if canvas is None or A4 is None:
+        return None
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    margin = 40
+    y = height - margin
+    content_width = width - 2 * margin
+
+    def new_page():
+        nonlocal y
+        pdf.showPage()
+        pdf.setFont("Helvetica", 11)
+        y = height - margin
+
+    def ensure_space(required=40):
+        nonlocal y
+        if y - required < margin:
+            new_page()
+
+    def write_heading(text):
+        nonlocal y
+        ensure_space(30)
+        pdf.setFont("Helvetica-Bold", 13)
+        pdf.drawString(margin, y, text)
+        y -= 22
+        pdf.setFont("Helvetica", 11)
+
+    def write_line(text=""):
+        nonlocal y
+        ensure_space(18)
+        pdf.drawString(margin, y, text)
+        y -= 16
+
+    def write_wrapped(text, indent=0):
+        """Wrap long lines to fit the page width."""
+        nonlocal y
+        ensure_space(18)
+        pdf.setFont("Helvetica", 11)
+        # Fallback: manual wrap at ~95 chars if simpleSplit not available
+        if simpleSplit:
+            lines = simpleSplit(text, "Helvetica", 11, content_width - indent)
+        else:
+            max_chars = 95
+            words = text.split()
+            lines, cur = [], ""
+            for w in words:
+                if len(cur) + len(w) + 1 <= max_chars:
+                    cur = (cur + " " + w).strip()
+                else:
+                    lines.append(cur)
+                    cur = w
+            if cur:
+                lines.append(cur)
+        for i, ln in enumerate(lines):
+            ensure_space(16)
+            pdf.drawString(margin + indent, y, ln)
+            y -= 16
+
+    def clean_text(t: str) -> str:
+        return t.replace("**", "").replace("–", "-")
+
+    # Title block
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(margin, y, "NeuroRiskAI – Results Report")
+    y -= 28
+    pdf.setFont("Helvetica", 11)
+    write_wrapped(f"Created on: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+    write_wrapped(f"Age: {demographics.get('age', '–')} | Goal: {demographics.get('goal', '–')} | Experience: {demographics.get('experience', '–')}")
+    write_line()
+
+    # 1. Biometrics
+    write_heading("1. Biometrics")
+    if biometrics_df is not None and not biometrics_df.empty:
+        for _, row in biometrics_df.iterrows():
+            pulse = row.get("Average Pulse (bpm)")
+            rt = row.get("Average Reaction Time (s)")
+            txt = (
+                f"{row.get('Market Phase', '–')}: Pulse {pulse:.0f} bpm, Reaction time {rt:.2f} s"
+                if pd.notnull(pulse) and pd.notnull(rt)
+                else f"{row.get('Market Phase', '–')}: No data available"
+            )
+            write_wrapped(txt)
+    else:
+        write_wrapped("No data available.")
+    write_line()
+
+    # 2. Stress Progression
+    write_heading("2. Stress Progression")
+    for phase, value in stress_summary.items():
+        write_wrapped(f"{phase}: Stress (z-score) {value:.2f}")
+    write_line()
+
+    # 3. Risk Progression
+    write_heading("3. Risk Progression")
+    for phase, value in risk_summary.items():
+        write_wrapped(f"{phase}: Risk index {value:.2f}")
+    write_line()
+
+    # 4. Key Metrics (Scores)
+    write_heading("4. Key Metrics (Scores)")
+    for key in ["RCS", "SSS", "RGS", "AdvisorNeedScore"]:
+        if key in scores:
+            write_wrapped(f"{key}: {scores[key]:.0f} / 100")
+    write_line()
+
+    # 5. Bias Cards – grouped and wrapped, no numbers, Green → Blue → Orange
+    write_heading("5. Bias Cards")
+    bias_msgs = compute_bias_messages(scores)
+    groups = [
+        ("success", "Positive (Green)"),
+        ("info", "Neutral (Blue)"),
+        ("warning", "Critical (Warning)"),
+    ]
+    for level, title in groups:
+        items = [m for lvl, m in bias_msgs if lvl == level]
+        if items:
+            write_wrapped(f"{title}:")
+            for m in items:
+                write_wrapped(" - " + clean_text(m), indent=12)
+            write_line()
+
+    # 6. Risk Character
+    write_heading("6. Risk Character")
+    write_wrapped(f"Profile: {risk_type}")
+    write_line()
+
+
+
+    pdf.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
 # ---------------------------------------------------------
-# Fragen & Szenarien (wie bisherig)
+# Questions & Scenarios (as before)
 # ---------------------------------------------------------
 SCENARIO_QUESTIONS = [
     # ---------------- CALM MARKET ----------------
@@ -710,100 +975,184 @@ SCENARIO_QUESTIONS = [
         "id": 1,
         "phase": "calm",
         "question": (
-            "Die Märkte sind stabil, die Wirtschaft wächst moderat. "
-            "Du hast den Betrag zur Verfügung, den du zu Beginn angegeben hast. "
-            "Wie würdest du ihn jetzt investieren?"
+            "It is a calm market environment. The economy is growing moderately and markets "
+            "fluctuate only slightly. You have a substantial amount of long-term capital to "
+            "invest. How would you allocate it today?"
         ),
         "options": [
-            {"label": "Alles in Cash auf dem Konto lassen (0% Rendite, 0% Schwankung)", "mu": 0, "sigma": 0},
-            {"label": "Konservativer Mischfonds: 4% erwartete Rendite, 5% Schwankung", "mu": 4, "sigma": 5},
-            {"label": "Ausgewogener Fonds: 6% erwartete Rendite, 10% Schwankung", "mu": 6, "sigma": 10},
-            {"label": "Dynamischer Aktienfonds: 8% erwartete Rendite, 15% Schwankung", "mu": 8, "sigma": 15},
+            {
+                "label": "Very defensive: mostly cash or savings accounts, only a small equity fund position",
+                "risk_level": 1,
+            },
+            {
+                "label": "Defensive-balanced: a mix of bonds and broad equity funds",
+                "risk_level": 2,
+            },
+            {
+                "label": "Balanced: a clearly higher equity share than bonds or cash",
+                "risk_level": 3,
+            },
+            {
+                "label": "Dynamic: almost fully invested in equities or equity funds",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": None,
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
         "id": 2,
         "phase": "calm",
         "question": (
-            "Du erhältst einen Bonus zusätzlich zum ursprünglichen Betrag. "
-            "Wie viel davon würdest du in Aktien investieren?"
+            "You receive an unexpected bonus on top of your regular income. "
+            "This bonus is free capital that you could invest. How much of this bonus "
+            "would you invest in equities?"
         ),
         "options": [
-            {"label": "Nichts – alles sicher halten", "mu": 1, "sigma": 1},
-            {"label": "20% in Aktien, Rest sicher", "mu": 3, "sigma": 4},
-            {"label": "50% in Aktien, 50% sicher", "mu": 4.5, "sigma": 8},
-            {"label": "80% in Aktien, 20% sicher", "mu": 6, "sigma": 14},
+            {
+                "label": "Nothing – keep the entire bonus in cash",
+                "risk_level": 1,
+            },
+            {
+                "label": "Invest about 25% in equities, keep 75% safe",
+                "risk_level": 2,
+            },
+            {
+                "label": "Invest about 50% in equities, 50% safe",
+                "risk_level": 3,
+            },
+            {
+                "label": "Invest about 75% or more in equities, only a small cash reserve",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": None,
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
+        # Disposition Effect in gains – Q3 (Strings wichtig für compute_scores)
         "id": 3,
         "phase": "calm",
         "question": (
-            "Nach drei Monaten in einem eher ruhigen Markt liegt dein Portfolio leicht im Plus. "
-            "Du hast mit deinem Startbetrag investiert und bist grundsätzlich zufrieden. Was tust du jetzt?"
+            "Imagine you invested a sum of money 12 months ago in a broadly diversified portfolio. "
+            "Today, your portfolio shows a moderate gain. You are generally satisfied with the result. "
+            "What do you do now?"
         ),
         "options": [
-            {"label": "Alles verkaufen und komplett in Cash gehen", "mu": 0.5, "sigma": 1},
-            {"label": "Gewinne mitnehmen, einen grösseren Teil verkaufen", "mu": 2, "sigma": 3},
-            {"label": "Teilverkauf, Teil investiert lassen", "mu": 3, "sigma": 5},
-            {"label": "Alles investiert lassen, langfristig denken", "mu": 4, "sigma": 8},
+            {
+                "label": "Sell everything and go completely to cash",
+                "risk_level": 1,
+            },
+            {
+                "label": "Take profits, sell a larger part of the portfolio",
+                "risk_level": 2,
+            },
+            {
+                "label": "Partial sale, leave part invested",
+                "risk_level": 3,
+            },
+            {
+                "label": "Leave everything invested and think long-term",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "disposition_gain",
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
-        # Sharpe-Anker (calm)
+        # Grundrisikoprofil in ruhiger Phase
         "id": 4,
         "phase": "calm",
         "question": (
-            "Dein:e Berater:in zeigt dir vier Modellportfolios mit ähnlichem Chance-Risiko-Verhältnis. "
-            "Alle haben ein ähnliches Verhältnis von Rendite zu Schwankung, unterscheiden sich aber im Niveau. "
-            "Welches Risikoniveau fühlt sich für dich am passendsten an?"
+            "You are planning a new long-term investment for general wealth building. "
+            "In a calm market environment like now, which description best matches the "
+            "risk level you would choose for this new investment?"
         ),
         "options": [
-            {"label": "Sehr defensiv: 2% Rendite, 3% Schwankung", "mu": 2, "sigma": 3},
-            {"label": "Defensiv: 3% Rendite, 5% Schwankung", "mu": 3, "sigma": 5},
-            {"label": "Ausgewogen: 4.5% Rendite, 7.5% Schwankung", "mu": 4.5, "sigma": 7.5},
-            {"label": "Dynamisch: 6% Rendite, 10% Schwankung", "mu": 6, "sigma": 10},
+            {
+                "label": "Very low risk – strong focus on capital preservation, minimal fluctuations",
+                "risk_level": 1,
+            },
+            {
+                "label": "Rather low risk – some fluctuation is acceptable, capital preservation is important",
+                "risk_level": 2,
+            },
+            {
+                "label": "Medium risk – balanced between return and fluctuation",
+                "risk_level": 3,
+            },
+            {
+                "label": "High risk – focus on long-term return, strong fluctuation is acceptable",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "gain_frame",
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
+        # Herding in calm phase
         "id": 5,
         "phase": "calm",
         "question": (
-            "Du liest, dass 80% der anderen Anleger aktuell in Aktienfonds investiert sind. "
-            "Dein Startbetrag ist noch nicht vollständig investiert. Wie reagierst du?"
+            "A survey among investors with a similar profile to you shows that around 80% of them "
+            "currently hold a high equity share in their portfolios. You yourself hold a more "
+            "defensive allocation. How do you react?"
         ),
         "options": [
-            {"label": "Ich bleibe bei meiner defensiven Strategie", "mu": 2, "sigma": 3},
-            {"label": "Ich erhöhe meine Aktienquote leicht", "mu": 3, "sigma": 5},
-            {"label": "Ich erhöhe meine Aktienquote deutlich", "mu": 4.5, "sigma": 9},
-            {"label": "Ich passe mich stark an und gehe sehr offensiv in Aktien", "mu": 6, "sigma": 13},
+            {
+                "label": "I stick with my defensive strategy and do not increase equities",
+                "risk_level": 1,
+            },
+            {
+                "label": "I increase my equity allocation slightly",
+                "risk_level": 2,
+            },
+            {
+                "label": "I increase my equity allocation significantly",
+                "risk_level": 3,
+            },
+            {
+                "label": "I adapt strongly and go very aggressively into equities to align with the majority",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "herding",
-        "herd_majority": "Ich passe mich stark an und gehe sehr offensiv in Aktien",
+        "herd_majority": "I adapt strongly and go very aggressively into equities to align with the majority",
+        "risk_relevant": True,  # Herding UND Risiko
     },
     {
         "id": 6,
         "phase": "calm",
         "question": (
-            "Es gibt keine besonderen Nachrichten. Dein Portfolio entwickelt sich in etwa wie erwartet. "
-            "Was tust du mit deiner Anlagestrategie?"
+            "You win a medium-sized lottery prize that is financially meaningful but not life-changing. "
+            "You decide to invest this amount separately from your existing portfolio. How would you "
+            "invest this lottery money?"
         ),
         "options": [
-            {"label": "Alles so lassen, gar nichts tun", "mu": 3, "sigma": 4},
-            {"label": "Leicht in etwas mehr Risiko umschichten", "mu": 4, "sigma": 7},
-            {"label": "Deutlich in riskantere Anlagen umschichten", "mu": 5, "sigma": 12},
-            {"label": "Etwas Kapital aus dem Markt nehmen (mehr Cash)", "mu": 2, "sigma": 3},
+            {
+                "label": "Keep it entirely in cash or a savings account",
+                "risk_level": 1,
+            },
+            {
+                "label": "Invest mainly in low-risk funds or bonds",
+                "risk_level": 2,
+            },
+            {
+                "label": "Invest mostly in diversified equity funds",
+                "risk_level": 3,
+            },
+            {
+                "label": "Treat it as 'play money' and invest mainly in riskier themes or individual stocks",
+                "risk_level": 4,
+            },
         ],
-        "bias_tag": None,
+        "bias_tag": None,  # Mental Accounting / Riskverhalten
         "herd_majority": None,
+        "risk_relevant": True,
     },
 
     # ---------------- BOOM MARKET ----------------
@@ -811,199 +1160,373 @@ SCENARIO_QUESTIONS = [
         "id": 7,
         "phase": "boom",
         "question": (
-            "Die Märkte sind in einer Rallye, viele Indizes sind auf Allzeithoch. "
-            "Dein Startbetrag ist teilweise investiert, dein Portfolio ist deutlich im Plus. "
-            "Wie investierst du jetzt zusätzliches Kapital?"
+            "Stock markets have risen strongly for several years, many indices are at or near all-time highs. "
+            "You receive a new annual bonus that you do not need for current expenses. How do you invest "
+            "this new money in the current boom phase?"
         ),
         "options": [
-            {"label": "Ich bleibe defensiv, kein zusätzliches Risiko", "mu": 3, "sigma": 4},
-            {"label": "Breiter Aktienfonds: 6% Rendite, 10% Schwankung", "mu": 6, "sigma": 10},
-            {"label": "Wachstumsfonds: 9% Rendite, 18% Schwankung", "mu": 9, "sigma": 18},
-            {"label": "Sektor-/Techfonds: 12% Rendite, 25% Schwankung", "mu": 12, "sigma": 25},
+            {
+                "label": "I keep the new money in cash and do not invest it for now",
+                "risk_level": 1,
+            },
+            {
+                "label": "I invest it mainly in broadly diversified equity funds",
+                "risk_level": 2,
+            },
+            {
+                "label": "I focus on more volatile growth or sector funds with higher return potential",
+                "risk_level": 3,
+            },
+            {
+                "label": "I invest in very concentrated or speculative themes to maximize upside",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": None,
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
+        # Overconfidence candidate – persönliche Outperformance
         "id": 8,
         "phase": "boom",
         "question": (
-            "Dein Portfolio ist in den letzten 12 Monaten um 25% gestiegen. "
-            "Du hast das Gefühl, 'gut im Markt' zu liegen. Was tust du?"
+            "Over the last three years, your portfolio has clearly outperformed the overall market. "
+            "You attribute this partly to your good decisions. You are now considering adjusting your "
+            "strategy. What do you do?"
         ),
         "options": [
-            {"label": "Gewinne realisieren, 80% verkaufen und in Cash gehen", "mu": 1, "sigma": 2},
-            {"label": "Teilgewinne realisieren, 50% investiert lassen", "mu": 3, "sigma": 5},
-            {"label": "Nur leicht reduzieren, grösstenteils investiert bleiben", "mu": 4.5, "sigma": 9},
-            {"label": "Investiert bleiben oder sogar aufstocken, Rallye weiterreiten", "mu": 6, "sigma": 14},
+            {
+                "label": "I reduce risk significantly and secure a large part of the gains",
+                "risk_level": 1,
+            },
+            {
+                "label": "I take some profits and slightly reduce risk",
+                "risk_level": 2,
+            },
+            {
+                "label": "I keep my current risk level unchanged",
+                "risk_level": 3,
+            },
+            {
+                "label": "I increase risk because I trust my ability to make good decisions",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "overconfidence_candidate",
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
-        # Sharpe-Anker (boom)
+        # Growth style choice in boom
         "id": 9,
         "phase": "boom",
         "question": (
-            "Nach der starken Rallye möchtest du prüfen, wie viel Wachstumsrisiko du wirklich tragen möchtest. "
-            "Du kannst zwischen vier Wachstumsfonds mit ähnlichem Chance-Risiko-Verhältnis wählen, "
-            "aber unterschiedlichen Risiko-Niveaus."
+            "You are about to set up a new equity investment in the current booming market. "
+            "Which type of equity strategy would you choose?"
         ),
         "options": [
-            {"label": "Defensiver Wachstumsfonds: 6% Rendite, 10% Schwankung", "mu": 6, "sigma": 10},
-            {"label": "Moderater Wachstumsfonds: 7.5% Rendite, 12.5% Schwankung", "mu": 7.5, "sigma": 12.5},
-            {"label": "Ausgewogener Wachstumsfonds: 9% Rendite, 15% Schwankung", "mu": 9, "sigma": 15},
-            {"label": "Aggressiver Wachstumsfonds: 12% Rendite, 20% Schwankung", "mu": 12, "sigma": 20},
+            {
+                "label": "Mainly large, established companies with relatively stable earnings",
+                "risk_level": 1,
+            },
+            {
+                "label": "A mix of large companies and selected growth stocks",
+                "risk_level": 2,
+            },
+            {
+                "label": "Focus on growth companies with higher earnings volatility",
+                "risk_level": 3,
+            },
+            {
+                "label": "Strong focus on very young or highly speculative companies",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": None,
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
+        # Classic gain-frame lottery
         "id": 10,
         "phase": "boom",
-        "question": "Du kannst zwischen sicheren und riskanteren Gewinnen wählen.",
+        "question": (
+            "You can choose between different gain profiles for a one-year investment. "
+            "All options refer to the same invested amount. Which gain profile would you prefer?"
+        ),
         "options": [
-            {"label": "Sicherer Gewinn von 500 CHF", "mu": 5, "sigma": 0},
-            {"label": "70% Chance auf 800 CHF, sonst 0 CHF", "mu": 5.6, "sigma": 12},
-            {"label": "40% Chance auf 1'500 CHF, sonst 0 CHF", "mu": 6, "sigma": 20},
-            {"label": "Kein sofortiger Gewinn, langfristig investiert bleiben", "mu": 4, "sigma": 8},
+            {
+                "label": "Secure small gain – you know exactly what you will receive",
+                "risk_level": 1,
+            },
+            {
+                "label": "Moderate chance of a noticeably higher gain, otherwise no gain",
+                "risk_level": 2,
+            },
+            {
+                "label": "Lower chance of a very high gain, otherwise no gain",
+                "risk_level": 3,
+            },
+            {
+                "label": "No immediate payout, stay fully invested long-term with full market risk",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "gain_frame",
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
+        # Pure Herding / FOMO – OHNE Risikobeitrag
         "id": 11,
         "phase": "boom",
         "question": (
-            "In den Medien heisst es: 'Alle kaufen jetzt Aktien, wer nicht investiert ist, verpasst den Boom.' "
-            "Du hast noch Liquidität aus deinem ursprünglichen Betrag. Wie reagierst du?"
+            "Several friends and colleagues tell you that they made high short-term profits with "
+            "a very popular, highly discussed investment theme (for example, a specific tech or "
+            "crypto asset). You have not invested in it so far. How do you react?"
         ),
         "options": [
-            {"label": "Ich bleibe bei meiner bisherigen Strategie", "mu": 3, "sigma": 5},
-            {"label": "Ich erhöhe moderat meine Aktienquote", "mu": 5, "sigma": 10},
-            {"label": "Ich gehe stark in Aktien, um nichts zu verpassen", "mu": 7, "sigma": 18},
-            {"label": "Ich nehme sogar Gewinne mit und reduziere Risiko", "mu": 2, "sigma": 4},
+            {
+                "label": "I do not invest and consciously stick to my own strategy",
+                "risk_level": 1,
+            },
+            {
+                "label": "I inform myself, but do not change my portfolio for now",
+                "risk_level": 2,
+            },
+            {
+                "label": "I invest a moderate amount to participate",
+                "risk_level": 3,
+            },
+            {
+                "label": "I invest a significant amount quickly to not miss the opportunity",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "herding",
-        "herd_majority": "Ich gehe stark in Aktien, um nichts zu verpassen",
+        "herd_majority": "I invest a significant amount quickly to not miss the opportunity",
+        "risk_relevant": False,  # Beispiel: nur Herding-Bias, kein Beitrag zum Risk-Average
     },
     {
+        # Overconfidence / bubble warnings
         "id": 12,
         "phase": "boom",
         "question": (
-            "Dein Portfolio ist stark im Plus, aber du liest erste Warnungen vor einer möglichen Blase. "
-            "Wie reagierst du?"
+            "Financial media and some experts warn more and more loudly of a possible bubble and "
+            "overvaluation on the markets. Your portfolio is strongly in profit. What do you do?"
         ),
         "options": [
-            {"label": "Ich reduziere Risiko deutlich", "mu": 2, "sigma": 4},
-            {"label": "Ich reduziere Risiko leicht", "mu": 3, "sigma": 6},
-            {"label": "Ich ändere nichts, die Rallye geht weiter", "mu": 5, "sigma": 11},
-            {"label": "Ich erhöhe sogar das Risiko (Hebelprodukte, mehr Aktien)", "mu": 7, "sigma": 18},
+            {
+                "label": "I reduce risk significantly and secure a large part of the profits",
+                "risk_level": 1,
+            },
+            {
+                "label": "I reduce risk slightly (small profit-taking)",
+                "risk_level": 2,
+            },
+            {
+                "label": "I do not change anything, the rally continues in my view",
+                "risk_level": 3,
+            },
+            {
+                "label": "I even increase risk and expand my equity or leverage positions",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "overconfidence_candidate",
         "herd_majority": None,
+        "risk_relevant": True,
     },
 
     # ---------------- CRISIS MARKET ----------------
     {
+        # Loss aversion candidate – crisis
         "id": 13,
         "phase": "crisis",
         "question": (
-            "Die Märkte sind um 20% gefallen, dein Portfolio ist deutlich im Minus. "
-            "Dein ursprünglich investierter Betrag ist spürbar geschrumpft. Was tust du?"
+            "Stock markets have fallen by around 30% within a year. Your long-term portfolio is "
+            "clearly in the red. You realize that such losses are emotionally very stressful for you. "
+            "What do you do?"
         ),
         "options": [
-            {"label": "Alles verkaufen, Verluste begrenzen und in Cash gehen", "mu": -5, "sigma": 3},
-            {"label": "Teilverkauf, Teil investiert lassen", "mu": -2, "sigma": 6},
-            {"label": "Investiert bleiben, langfristige Sicht", "mu": 1, "sigma": 10},
-            {"label": "Zusätzlich Kapital nachschiessen und 'billig' nachkaufen", "mu": 3, "sigma": 14},
+            {
+                "label": "Sell everything, limit losses and go to cash",
+                "risk_level": 1,
+            },
+            {
+                "label": "Partial sale, leave part invested",
+                "risk_level": 2,
+            },
+            {
+                "label": "Stay invested and keep a long-term view",
+                "risk_level": 3,
+            },
+            {
+                "label": "Add additional capital and buy 'cheap'",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "loss_aversion_candidate",
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
-        # Sharpe-Anker (crisis)
+        # Crisis risk setting
         "id": 14,
         "phase": "crisis",
         "question": (
-            "Du kannst zwischen vier Strategien mit ähnlichem Chance-Risiko-Verhältnis wählen, "
-            "aber auf Krisenniveau."
+            "In the current market crisis you are reviewing your overall strategy. "
+            "For the next years, how much risk are you willing to carry in your investments?"
         ),
         "options": [
-            {"label": "Sehr defensiv: -1% erwartete Rendite, 3% Schwankung", "mu": -1, "sigma": 3},
-            {"label": "Defensiv: 1% Rendite, 6% Schwankung", "mu": 1, "sigma": 6},
-            {"label": "Moderat offensiv: 3% Rendite, 9% Schwankung", "mu": 3, "sigma": 9},
-            {"label": "Offensiv: 5% Rendite, 12% Schwankung", "mu": 5, "sigma": 12},
+            {
+                "label": "Very defensive – strong focus on capital preservation, little fluctuation",
+                "risk_level": 1,
+            },
+            {
+                "label": "Defensive – reduced equity share, limited fluctuation acceptable",
+                "risk_level": 2,
+            },
+            {
+                "label": "Balanced – you accept clear fluctuations for long-term return",
+                "risk_level": 3,
+            },
+            {
+                "label": "Aggressive – you accept strong fluctuations to use the crisis as an opportunity",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": None,
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
+        # Recency bias – Q15 (Strings wichtig)
         "id": 15,
         "phase": "crisis",
         "question": (
-            "Nach zwei weiteren negativen Börsentagen hat dein Portfolio nochmals verloren. "
-            "Wie reagierst du jetzt?"
+            "In the last weeks, markets have steadily fallen and the last two trading days were again "
+            "clearly negative. Your portfolio shows large losses. How do you react now?"
         ),
         "options": [
-            {"label": "Ich verkaufe jetzt alles", "mu": -6, "sigma": 2},
-            {"label": "Ich verkaufe nur einen Teil", "mu": -3, "sigma": 5},
-            {"label": "Ich halte durch, ohne weiter zu investieren", "mu": 0, "sigma": 6},
-            {"label": "Ich halte durch und kaufe sogar nach", "mu": 1, "sigma": 9},
+            {
+                "label": "I sell everything now and go to cash",
+                "risk_level": 1,
+            },
+            {
+                "label": "I only sell part of the portfolio",
+                "risk_level": 2,
+            },
+            {
+                "label": "I hold on, without investing further",
+                "risk_level": 3,
+            },
+            {
+                "label": "I hold on and even buy more, because I see opportunities",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "recency_candidate",
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
+        # Herding in crisis
         "id": 16,
         "phase": "crisis",
         "question": (
-            "In den Medien heisst es: 'Alle verkaufen jetzt, es könnte der Beginn einer langen Krise sein.' "
-            "Was tust du?"
+            "The media say: 'Everyone is selling now, this could be the beginning of a long crisis.' "
+            "You also hear from acquaintances that they have sold a large part of their investments. "
+            "What do you do?"
         ),
         "options": [
-            {"label": "Ich bleibe investiert, auch wenn es weh tut", "mu": 0, "sigma": 8},
-            {"label": "Ich reduziere Risiko moderat", "mu": -2, "sigma": 5},
-            {"label": "Ich verkaufe wie die Mehrheit", "mu": -4, "sigma": 3},
-            {"label": "Ich nutze die Gelegenheit bewusst zum Nachkaufen", "mu": 2, "sigma": 10},
+            {
+                "label": "I sell like the majority and move largely into cash",
+                "risk_level": 1,
+            },
+            {
+                "label": "I reduce risk moderately but keep a core position",
+                "risk_level": 2,
+            },
+            {
+                "label": "I stay invested, even if it hurts",
+                "risk_level": 3,
+            },
+            {
+                "label": "I consciously use the opportunity to buy more",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "herding",
-        "herd_majority": "Ich verkaufe wie die Mehrheit",
+        "herd_majority": "I sell like the majority and move largely into cash",
+        "risk_relevant": True,
     },
     {
         "id": 17,
         "phase": "crisis",
         "question": (
-            "Du hast noch Liquidität aus deinem Startbetrag. Die Kurse sind stark gefallen. "
-            "Wie gehst du mit zusätzlichem Kapital um?"
+            "You have not yet invested a separate amount of money that you could also use as a "
+            "long-term investment. Prices have fallen sharply. How do you deal with this additional capital "
+            "in the current crisis?"
         ),
         "options": [
-            {"label": "Keine weitere Investition, alles in Cash halten", "mu": 0, "sigma": 0},
-            {"label": "Defensiven Mischfonds kaufen", "mu": 2, "sigma": 5},
-            {"label": "Breiten Aktienfonds kaufen", "mu": 4, "sigma": 10},
-            {"label": "Sehr riskante, stark gefallene Einzelaktien nachkaufen", "mu": 6, "sigma": 18},
+            {
+                "label": "No further investment, hold everything in cash",
+                "risk_level": 1,
+            },
+            {
+                "label": "Invest a small part in a defensive mixed fund",
+                "risk_level": 2,
+            },
+            {
+                "label": "Invest a larger part in a broad equity fund",
+                "risk_level": 3,
+            },
+            {
+                "label": "Invest most of it in very risky, sharply fallen individual stocks",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": None,
         "herd_majority": None,
+        "risk_relevant": True,
     },
     {
+        # Hindsight / regret – Q18 (Strings wichtig)
         "id": 18,
         "phase": "crisis",
         "question": (
-            "Angenommen, du könntest die letzten 6 Monate zurückspulen – "
-            "würdest du dein Portfolio anders aufstellen?"
+            "Looking back, suppose you could rewind the last 12 months and set up your portfolio "
+            "again from today's perspective. How would you decide?"
         ),
         "options": [
-            {"label": "Ja, ich wäre viel defensiver gewesen", "mu": -1, "sigma": 2},
-            {"label": "Ich würde nur kleine Anpassungen vornehmen", "mu": 0, "sigma": 4},
-            {"label": "Nein, ich hätte es gleich gemacht", "mu": 1, "sigma": 6},
-            {"label": "Ich wäre sogar offensiver gewesen und hätte mehr Risiko genommen", "mu": 2, "sigma": 8},
+            {
+                "label": "Yes, I would have been much more defensive in my allocation",
+                "risk_level": 1,
+            },
+            {
+                "label": "I would only make small adjustments to the portfolio",
+                "risk_level": 2,
+            },
+            {
+                "label": "No, I would have done the same",
+                "risk_level": 3,
+            },
+            {
+                "label": "I would have been even more aggressive and taken more risk",
+                "risk_level": 4,
+            },
         ],
         "bias_tag": "hindsight",
         "herd_majority": None,
+        "risk_relevant": True,
     },
 ]
+
 PHASE_ORDER = ["calm", "boom", "crisis"]
+
+
 
 
 # ---------------------------------------------------------
@@ -1012,7 +1535,7 @@ PHASE_ORDER = ["calm", "boom", "crisis"]
 DB_FILE = Path(__file__).parent / "neurorisk.db"
 
 def init_db():
-    """Initialisiere SQLite-Datenbank"""
+    """Initialize SQLite database"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
@@ -1027,7 +1550,7 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,  -- NULL für Gast-Sessions
+            username TEXT,  -- NULL for guest sessions
             demographics TEXT NOT NULL,
             scores TEXT NOT NULL,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1056,7 +1579,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Initialisiere DB beim Start
+# Initialize DB on startup
 init_db()
 
 def hash_password(pw: str) -> str:
@@ -1082,7 +1605,7 @@ def create_user(username: str, password: str) -> bool:
         conn.close()
         return True
     except Exception as e:
-        st.error(f"Fehler beim Erstellen des Accounts: {e}")
+        st.error(f"Error creating account: {e}")
         return False
 
 def verify_user(username: str, password: str) -> bool:
@@ -1097,7 +1620,7 @@ def verify_user(username: str, password: str) -> bool:
     return False
 
 def load_user_profile(username: str):
-    """Lade das neueste Profil eines Users"""
+    """Load the latest profile of a user"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -1117,7 +1640,7 @@ def load_user_profile(username: str):
     
     profile_id = profile["id"]
     
-    # Lade alle Responses für dieses Profil
+    # Load all responses for this profile
     c.execute("""
         SELECT q_id, phase, selected_label, mu, sigma, x_risk_relative, 
                x_reaction_time, x_pulse, advisor_help_used, switch_action
@@ -1129,14 +1652,14 @@ def load_user_profile(username: str):
     responses_rows = c.fetchall()
     conn.close()
     
-    # Konvertiere zu List of Dicts
+    # Convert to list of dicts
     responses = [dict(row) for row in responses_rows]
     
     try:
         demographics = json.loads(profile["demographics"])
         scores = json.loads(profile["scores"])
     except Exception as e:
-        st.error(f"Fehler beim Laden des Profils: {e}")
+        st.error(f"Error loading profile: {e}")
         return None
     
     return {
@@ -1147,12 +1670,12 @@ def load_user_profile(username: str):
     }
 
 def save_user_profile(username: str, demographics: dict, responses: list, scores: dict):
-    """Speichere Profil + alle Responses"""
+    """Save profile + all responses"""
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         
-        # Konvertiere pandas Series zu dict vor dem Speichern
+        # Convert pandas Series to dict before saving
         scores_clean = {}
         for key, val in scores.items():
             if hasattr(val, 'to_dict'):  # pandas Series
@@ -1164,7 +1687,7 @@ def save_user_profile(username: str, demographics: dict, responses: list, scores
             else:
                 scores_clean[key] = str(val)
         
-        # 1. Speichere Profil-Metadaten (als JSON)
+        # 1. Save profile metadata (as JSON)
         c.execute("""
             INSERT INTO profiles (username, demographics, scores)
             VALUES (?, ?, ?)
@@ -1172,7 +1695,7 @@ def save_user_profile(username: str, demographics: dict, responses: list, scores
         
         profile_id = c.lastrowid
         
-        # 2. Speichere alle Responses
+        # 2. Save all responses
         for resp in responses:
             c.execute("""
                 INSERT INTO responses 
@@ -1197,12 +1720,12 @@ def save_user_profile(username: str, demographics: dict, responses: list, scores
         conn.close()
         return True
     except Exception as e:
-        st.error(f"Fehler beim Speichern des Profils: {e}")
+        st.error(f"Error saving profile: {e}")
         return False
 
 def save_guest_profile(demographics: dict, responses: list, scores: dict):
-    """Speichere Gast-Session (username = NULL).
-       Liefert die neue profile_id (int) oder None bei Fehler.
+    """Save guest session (username = '' for old DBs with NOT NULL).
+       Returns the new profile_id (int) or None on error.
     """
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -1219,15 +1742,15 @@ def save_guest_profile(demographics: dict, responses: list, scores: dict):
             else:
                 scores_clean[key] = str(val)
         
-        # username = NULL für Gäste
+        # username = '' instead of NULL (compatible with NOT NULL constraint)
+        guest_username = ""
         c.execute("""
             INSERT INTO profiles (username, demographics, scores)
             VALUES (?, ?, ?)
-        """, (None, json.dumps(demographics), json.dumps(scores_clean)))
+        """, (guest_username, json.dumps(demographics), json.dumps(scores_clean)))
         
         profile_id = c.lastrowid
         
-        # Speichere Responses
         for resp in responses:
             c.execute("""
                 INSERT INTO responses 
@@ -1252,11 +1775,11 @@ def save_guest_profile(demographics: dict, responses: list, scores: dict):
         conn.close()
         return profile_id
     except Exception as e:
-        st.error(f"Fehler beim Speichern der Gast-Session: {e}")
+        st.error(f"Error saving guest session: {e}")
         return None
 
 # ---------------------------------------------------------
-# Session State initialisieren
+# Session State Initialization
 # ---------------------------------------------------------
 def init_session():
     if "stage" not in st.session_state:
@@ -1271,14 +1794,14 @@ def init_session():
         st.session_state.logged_in_user = None
         st.session_state.profile_saved = False
         st.session_state.saved_profile = None
-        st.session_state.saved_profile_id = None  # NEU: für Gast-Profile-ID
+        st.session_state.saved_profile_id = None  # NEW: for guest profile ID
 
 
 init_session()
 
 
 # ---------------------------------------------------------
-# Hilfsfunktionen für Scores
+# Helper Functions for Scores
 # ---------------------------------------------------------
 def compute_scores(demo, responses):
     if not responses:
@@ -1286,8 +1809,18 @@ def compute_scores(demo, responses):
 
     df = pd.DataFrame(responses)
 
-    # --- Risk pro Phase ---
-    risk_by_phase = df.groupby("phase")["x_risk_relative"].mean().reindex(PHASE_ORDER)
+    # ---------- RISK: nur risk_relevante Fragen ----------
+    if "risk_relevant" in df.columns:
+        df_risk = df[df["risk_relevant"] == True]
+    else:
+        df_risk = df
+
+    # Falls aus irgendeinem Grund alle Fragen risk_relevant=False wären:
+    if df_risk.empty:
+        # Fallback, damit nichts crasht
+        df_risk = df.copy()
+
+    risk_by_phase = df_risk.groupby("phase")["x_risk_relative"].mean().reindex(PHASE_ORDER)
     R_calm = risk_by_phase.get("calm", 0.0)
     R_boom = risk_by_phase.get("boom", 0.0)
     R_crisis = risk_by_phase.get("crisis", 0.0)
@@ -1297,7 +1830,7 @@ def compute_scores(demo, responses):
     delta_R = float(R_max - R_min) if pd.notnull(R_max) and pd.notnull(R_min) else 0.0
     RCS = 100 * (1 - min(max(delta_R, 0.0), 1.0))  # Risk Consistency Score
 
-    # --- Stress aus Reaktionszeit + Puls ---
+    # ---------- STRESS: alle Fragen (inkl. Bias-only) ----------
     rt = df["x_reaction_time"].values
     pulse = df["x_pulse"].values
 
@@ -1311,13 +1844,11 @@ def compute_scores(demo, responses):
     z_pulse = zscore(pulse)
 
     df["stress_i"] = 0.6 * z_rt + 0.4 * z_pulse
-
     stress_by_phase = df.groupby("phase")["stress_i"].mean().reindex(PHASE_ORDER)
     S_calm = stress_by_phase.get("calm", 0.0)
     S_boom = stress_by_phase.get("boom", 0.0)
     S_crisis = stress_by_phase.get("crisis", 0.0)
 
-    # --- Stress Resilience Score: konsistent mit Risk Consistency Score (max - min über alle Phasen)
     try:
         s_max = float(stress_by_phase.max())
         s_min = float(stress_by_phase.min())
@@ -1325,18 +1856,21 @@ def compute_scores(demo, responses):
         s_max = 0.0
         s_min = 0.0
     delta_s = max(0.0, s_max - s_min)
-    delta_s_clamped = min(max(delta_s, 0.0), 1.0)
-    SRS = 100 * (1 - delta_s_clamped)  # Stress Resilience Score
+    RANGE_MAX = 4.0
+    ratio = delta_s / RANGE_MAX
+    ratio_clamped = min(max(ratio, 0.0), 1.0)
+    SSS = 100 * (1 - ratio_clamped)  # Stress Stability Score
 
-    # --- Reality Gap ---
-    SR = demo.get("stated_risk_norm", 0.5)
-    BR = df["x_risk_relative"].mean()
-    G = abs(SR - BR)
+    # ---------- Reality Gap ----------
+    SS = demo.get("stated_risk_norm", 0.5)  # self-stated risk [0,1]
+
+    BR = df_risk["x_risk_relative"].mean() if not df_risk.empty else 0.5
+    G = abs(SS - BR)
     RGS = 100 * G
 
-    # --- Advisor Need Score ---
+    # ---------- Advisor Need ----------
     RCS_norm = 1 - RCS / 100.0
-    SRS_norm = 1 - SRS / 100.0
+    SSS_norm = 1 - SSS / 100.0
     RGS_norm = RGS / 100.0
 
     help_rate = df["advisor_help_used"].mean() if "advisor_help_used" in df else 0.0
@@ -1344,48 +1878,44 @@ def compute_scores(demo, responses):
 
     ANS_raw = (
         0.3 * RCS_norm
-        + 0.25 * SRS_norm
+        + 0.25 * SSS_norm
         + 0.25 * RGS_norm
         + 0.1 * help_rate
         + 0.1 * switch_rate
     )
     AdvisorNeedScore = 100 * ANS_raw
 
-    # --- Bias-Proxies ---
-    # Loss Aversion: Unterschied Risiko Wahl Boom vs Crisis
+    # ---------- Bias Proxies (wie bei dir, aber mit R_boom/R_crisis aus df_risk) ----------
     loss_aversion_proxy = R_boom - R_crisis
 
-    # Herding
-    herd_rows = [r for r in responses if r.get("bias_tag") == "herding"]
-    herd_follow_rate = 0.0
-    if herd_rows:
-        herd_follow_rate = np.mean([r.get("follow_crowd", 0) for r in herd_rows])
+    herd_rows = [r for r in responses if r.get("herd_majority_flag") == 1]
+    herd_follow_rate = np.mean([r.get("follow_crowd", 0) for r in herd_rows]) if herd_rows else 0.0
 
     # Disposition (q_id 3)
     disp = None
     disp_row = next((r for r in responses if r["q_id"] == 3), None)
     if disp_row:
         label = disp_row["selected_label"].lower()
-        if "alles verkaufen" in label:
-            disp = "hoch"
-        elif "gewinne mitnehmen" in label or "grösseren teil" in label:
-            disp = "mittel"
-        elif "teilverkauf" in label:
-            disp = "leicht"
+        if "sell everything" in label:
+            disp = "high"
+        elif "take profits" in label or "larger part" in label:
+            disp = "medium"
+        elif "partial sale" in label:
+            disp = "slight"
         else:
-            disp = "niedrig"
+            disp = "low"
 
     # Recency (q_id 15)
     recency = None
     q15 = next((r for r in responses if r["q_id"] == 15), None)
     if q15:
         label = q15["selected_label"].lower()
-        if "verkaufe jetzt alles" in label:
-            recency = "stark_negativ"
-        elif "verkaufe nur einen teil" in label:
-            recency = "moderat"
-        elif "halte durch" in label and "kaufe sogar nach" in label:
-            recency = "resilient_proaktiv"
+        if "sell everything now" in label:
+            recency = "strong_negative"
+        elif "only sell part" in label:
+            recency = "moderate"
+        elif "hold on" in label and "even buy more" in label:
+            recency = "resilient_proactive"
         else:
             recency = "resilient"
 
@@ -1394,28 +1924,28 @@ def compute_scores(demo, responses):
     q18 = next((r for r in responses if r["q_id"] == 18), None)
     if q18:
         label = q18["selected_label"].lower()
-        if "viel defensiver" in label:
-            hindsight = "hoch"
-        elif "kleine anpassungen" in label:
-            hindsight = "moderat"
-        elif "offensiver" in label:
-            hindsight = "offensiver"
+        if "much more defensive" in label:
+            hindsight = "high"
+        elif "small adjustments" in label:
+            hindsight = "moderate"
+        elif "more aggressive" in label:
+            hindsight = "aggressive"
         else:
-            hindsight = "gering"
+            hindsight = "low"
 
-    # Overconfidence-Proxy
-    OC_raw = SR * (1 - RCS / 100.0) * (1 - SRS / 100.0)
+    # Overconfidence Proxy
+    OC_raw = SS * (1 - RCS / 100.0) * (1 - SSS / 100.0)
     OverconfidenceScore = 100 * OC_raw
 
     scores = {
         "risk_by_phase": risk_by_phase,
         "stress_by_phase": stress_by_phase,
         "RCS": float(RCS),
-        "SRS": float(SRS),
+        "SSS": float(SSS),
         "RGS": float(RGS),
         "AdvisorNeedScore": float(AdvisorNeedScore),
         "BR": float(BR),
-        "SR": float(SR),
+        "SS": float(SS),
         "loss_aversion_proxy": float(loss_aversion_proxy),
         "herding_score": float(herd_follow_rate * 100),
         "disposition": disp,
@@ -1425,18 +1955,41 @@ def compute_scores(demo, responses):
     }
     return scores
 
+def classify_risk_level(BR: float) -> str:
+    """Risk Level (BR) → Defensive / Balanced / Dynamic."""
+    if BR < 0.33:
+        return "Defensive Investor"
+    elif BR < 0.66:
+        return "Balanced Investor"
+    return "Dynamic Investor"
+
+def classify_stability_profile(RCS: float, SSS: float) -> str:
+    """2x2 Matrix from RCS & SSS → 4 Archetypes (threshold at 50)."""
+    def is_high(x): 
+        return x >= 50
+    def is_low(x): 
+        return x < 50
+
+    if is_high(RCS) and is_high(SSS):
+        return "Calm & Consistent Investor"
+    if is_high(RCS) and is_low(SSS):
+        return "Calm Outside, Storm Inside"
+    if is_low(RCS) and is_high(SSS):
+        return "Flexible, but relaxed"
+    return "Emotional Swing Investor"
+
 # ---------------------------------------------------------
-# User-Management Funktionen
+# User Management Functions
 # ---------------------------------------------------------
 USERS_FILE = Path(__file__).parent / "users.json"
 
-# Cache für Users (vermeidet wiederholtes Lesen)
+# Cache for users (avoids repeated reading)
 @st.cache_resource
 def get_users_cache():
     return {"data": None, "last_modified": None}
 
 def load_users():
-    """Lade users.json mit lokalem Cache"""
+    """Load users.json with local cache"""
     cache = get_users_cache()
     
     if not os.path.exists(USERS_FILE):
@@ -1446,11 +1999,11 @@ def load_users():
         stat = os.stat(USERS_FILE)
         current_mtime = stat.st_mtime
         
-        # Cache ist aktuell?
+        # Is cache current?
         if cache["data"] is not None and cache["last_modified"] == current_mtime:
             return cache["data"]
         
-        # Neu laden
+        # Reload
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         
@@ -1458,30 +2011,30 @@ def load_users():
         cache["last_modified"] = current_mtime
         return data
     except Exception as e:
-        st.error(f"Fehler beim Laden: {e}")
+        st.error(f"Error loading: {e}")
         return {}
 
 def save_users(users):
     """Speichere users.json und invalidiere Cache"""
     try:
-        # Stelle sicher, dass Verzeichnis existiert
+        # Ensure directory exists
         USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
         
         with open(USERS_FILE, "w", encoding="utf-8") as f:
             json.dump(users, f, ensure_ascii=False, indent=2)
         
-        # Cache invalidieren
+        # Invalidate cache
         cache = get_users_cache()
         cache["data"] = None
         cache["last_modified"] = None
     except Exception as e:
-        st.error(f"Fehler beim Speichern: {e}")
+        st.error(f"Error saving: {e}")
 
 # ---------------------------------------------------------
-# UI: HOME-SEITE (mit Login / Konto)
+# UI: HOME PAGE (with Login / Account)
 # ---------------------------------------------------------
 if st.session_state.stage == "home":
-    # Logo einfügen – mittig zentriert OBERHALB der Card
+    # Insert logo – centered above the card
     logo_path = Path(__file__).parent / "logo.png"
     if logo_path.exists():
         col_logo1, col_logo_center, col_logo2 = st.columns([1, 2, 1])
@@ -1492,87 +2045,87 @@ if st.session_state.stage == "home":
     # Hero Section
     st.markdown('''
         <div class="neuro-hero">
-            <h2>Entdecke dein wahres Risikoprofil</h2>
+            <h2>Discover Your True Risk Profile</h2>
             <p>
-                Erfahre in nur 3 Minuten, wie du in ruhigen, euphorischen und krisenhaften 
-                Märkten wirklich reagierst – nicht nur, wie du dich selbst einschätzt.
+                Find out in just 3 minutes how you really react in calm, euphoric and crisis-like 
+                markets – not just how you assess yourself.
             </p>
         </div>
     ''' , unsafe_allow_html=True)
 
     # Feature Tiles
-    st.markdown("### Warum NeuroRisk AI?")
+    st.markdown("### Why NeuroRisk AI?")
     col1, col2, col3 = st.columns(3)
     
     with col1:
         render_feature_tile(
             "🎯", 
-            "Objektive Messung", 
-            "Verhaltensbasierte Analyse statt Selbsteinschätzung"
+            "Objective Measurement", 
+            "Behavior-based analysis instead of self-assessment"
         )
     
     with col2:
         render_feature_tile(
             "📊", 
-            "Persönliches Risikoprofil", 
-            "Treffe zukünftig bessere Anlageentscheidungen"
+            "Personal Risk Profile", 
+            "Make better investment decisions in the future"
         )
     
     with col3:
         render_feature_tile(
             "🔒", 
-            "Datenschutz first", 
-            "DSGVO-konform, deine Daten gehören dir"
+            "Privacy First", 
+            "GDPR compliant, your data belongs to you"
         )
 
     st.markdown("---") 
 
-    tab1, tab2 = st.tabs(["🔐 Login", "👤 Gast"])
+    tab1, tab2 = st.tabs(["🔐 Login", "👤 Guest"])
 
     with tab1:
-        st.subheader("Mein Konto")
+        st.subheader("My Account")
         with st.form("login_form", clear_on_submit=True):
-            username = st.text_input("Benutzername")
-            password = st.text_input("Passwort", type="password")
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
             col1, col2 = st.columns(2)
             with col1:
-                login_btn = st.form_submit_button("Login", use_container_width=True)
+                login_btn = st.form_submit_button("Login", width='stretch')
             with col2:
-                create_btn = st.form_submit_button("Account erstellen", use_container_width=True)
+                create_btn = st.form_submit_button("Create Account", width='stretch')
 
         if login_btn or create_btn:
             if not username or not password:
-                st.error("❌ Benutzername und Passwort erforderlich!")
+                st.error("❌ Username and password required!")
             else:
                 if create_btn:
                     if user_exists(username):
-                        st.error(f"❌ Benutzername '{username}' bereits vorhanden.")
+                        st.error(f"❌ Username '{username}' already exists.")
                     else:
                         if create_user(username, password):
-                            st.success(f"✅ Account '{username}' erstellt! Bitte jetzt einloggen.")
+                            st.success(f"✅ Account '{username}' created! Please login now.")
                         else:
-                            st.error("❌ Fehler beim Erstellen des Accounts.")
+                            st.error("❌ Error creating account.")
                 
                 elif login_btn:
                     if verify_user(username, password):
-                        st.success(f"✅ Eingeloggt als {username}")
+                        st.success(f"✅ Logged in as {username}")
                         st.session_state.logged_in_user = username
-                        # Profil laden (optional in Session speichern)
+                        # Load profile (optionally store in session)
                         profile = load_user_profile(username)
                         st.session_state.saved_profile = profile if profile else None
-                        # Kein automatischer Wechsel der Stage hier; wir rendern die Aktionsbox unten.
+                        # No automatic stage change here; we render the action box below.
                     else:
-                        st.error("❌ Falscher Benutzername oder Passwort.")
+                        st.error("❌ Wrong username or password.")
     
-    # NEU: Aktionsbox IMMER rendern, wenn eingeloggt (nicht nur beim Submit)
+    # NEW: Always render action box when logged in (not just on submit)
     if st.session_state.get("logged_in_user"):
         username = st.session_state.logged_in_user
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown(
             f"""
             <div style="background-color: {PRIMARY_COLOR}; color: white; padding: 1.5rem; border-radius: 0.75rem; text-align: center;">
-              <h3 style="margin: 0; color: white;">Willkommen, {username}! 👋</h3>
-              <h4 style="margin: 0.5rem 0 0 0;">Starte eine neue Simulation oder sieh dir dein Profil, sofern bereits eine Simulation durchgeführt wurde</h4>
+              <h3 style="margin: 0; color: white;">Welcome, {username}! 👋</h3>
+              <h4 style="margin: 0.5rem 0 0 0;">Start a new simulation or view your profile if you've already completed a simulation</h4>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1584,8 +2137,8 @@ if st.session_state.stage == "home":
 
         col_sim1, col_sim2 = st.columns(2)
         with col_sim1:
-            if st.button("Neue Simulation starten", key="new_sim_login", width="stretch"):
-                # Nur Sim-Daten resetten; Login erhalten
+            if st.button("Start New Simulation", key="new_sim_login", width='stretch'):
+                # Only reset sim data; keep login
                 st.session_state.responses = []
                 st.session_state.demographics = {}
                 st.session_state.current_q_index = 0
@@ -1594,43 +2147,46 @@ if st.session_state.stage == "home":
                 st.session_state.seen_phase_intros = set()
                 st.session_state.profile_saved = False
                 st.session_state.stage = "demographics"
+                st.session_state.scroll_top = True
                 st.rerun()
         with col_sim2:
             if st.session_state.get("saved_profile"):
-                if st.button("📊 My Risk Profile", key="view_profile_login", width="stretch"):
+                if st.button("📊 My Risk Profile", key="view_profile_login", width='stretch'):
                     prof = st.session_state.saved_profile
                     st.session_state.demographics = prof["demographics"]
                     st.session_state.responses = prof["responses"]
-                    st.session_state.profile_saved = True  # bereits gespeichert
+                    st.session_state.profile_saved = True  # already saved
                     st.session_state.stage = "results"
+                    st.session_state.scroll_top = True
                     st.rerun()
             else:
-                st.write("")  # Platzhalter
+                st.write("")  # Placeholder
     else:
         with tab2:
-            st.subheader("Als Gast starten")
+            st.subheader("Start as Guest")
             st.markdown(
                 """
-                Du kannst die Simulation auch als Gast starten. Deine Daten werden nur lokal in deinem Browser gespeichert 
-                und nicht mit einem Konto verknüpft.
+                You can also start the simulation as a guest. Your data will only be stored locally in your browser 
+                and not linked to an account.
                 """
             )
-            if st.button("Simulation als Gast starten", key="guest_start"):
+            if st.button("Start Simulation as Guest", key="guest_start"):
                 st.session_state.stage = "demographics"
+                st.session_state.scroll_top = True
                 st.rerun()
 
     st.markdown("---") 
     # How it works section
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("### So funktioniert's")
+    st.markdown("### How It Works")
     
     st.markdown('''
         <div class="neuro-card">
-            <p><strong>1. Profil erstellen</strong> – Kurze Angaben zu deiner Person und Erfahrung</p>
-            <p><strong>2. Simulation durchlaufen</strong> – 18 Entscheidungen in verschiedenen Marktphasen</p>
-            <p><strong>3. Ergebnis erhalten</strong> – Dein persönliches Risikoprofil mit Insights</p>
-            <p><strong>4. Vergleichen</strong> – Sieh, wie du im Vergleich zu anderen abschneidest</p>
-            <p><strong>5. Handeln</strong> – Leite Massnahmen ab oder optimiere dein Portfolio</p>
+            <p><strong>1. Create profile</strong> – Brief information about yourself and your experience</p>
+            <p><strong>2. Complete simulation</strong> – 18 decisions in different market phases</p>
+            <p><strong>3. Get results</strong> – Your personal risk profile with insights</p>
+            <p><strong>4. Compare</strong> – See how you compare to others</p>
+            <p><strong>5. Act</strong> – Derive measures for your investment strategy</p>
         </div>
     ''', unsafe_allow_html=True)
     
@@ -1641,8 +2197,8 @@ if st.session_state.stage == "home":
         st.markdown(
             """
             <div class="neuro-card" style="text-align: center;">
-            <b>🧩 Biases erkennen</b><br>
-            Herding, Loss Aversion, Overconfidence & mehr
+            <b>🧩 Bias Detection</b><br>
+            Herding, Loss Aversion, Overconfidence & more
             </div>
             """,
             unsafe_allow_html=True,
@@ -1651,8 +2207,8 @@ if st.session_state.stage == "home":
         st.markdown(
             """
             <div class="neuro-card" style="text-align: center;">
-            <b>📊 Scores berechnen</b><br>
-            RCS, SRS, RGS, Advisor Need Score
+            <b>📊 Score Calculation</b><br>
+            RCS, SSS, RGS, Advisor Need Score
             </div>
             """,
             unsafe_allow_html=True,
@@ -1661,8 +2217,8 @@ if st.session_state.stage == "home":
         st.markdown(
             """
             <div class="neuro-card" style="text-align: center;">
-            <b>💡 Profil erstellen</b><br>
-            Defensiv, Ausgewogen oder Dynamisch
+            <b>💡 Discover Your Risk Profile</b><br>
+            AI Clustering Coming Soon!
             </div>
             """,
             unsafe_allow_html=True,
@@ -1674,34 +2230,34 @@ if st.session_state.stage == "home":
 
 
 # ---------------------------------------------------------
-# UI: DEMOGRAFIE
+# UI: DEMOGRAPHICS
 # ---------------------------------------------------------
 elif st.session_state.stage == "demographics":
-    st.title("NeuroRisk AI – Deine Basisdaten")
+    st.title("Your Basic Data")
     
-    st.markdown("Bevor die Simulation startet, möchten wir ein paar Dinge über dich wissen.")
+    st.markdown("Before the simulation starts, we need a few things about you.")
     
     with st.form("demographics_form"):
-        st.subheader("1. Deine Basisdaten")
-        age = st.number_input("Alter", min_value=18, max_value=99, value=30, step=1)
-        gender = st.selectbox("Geschlecht (optional)", ["Keine Angabe", "Weiblich", "Männlich", "Divers"])
-        job = st.text_input("Beruf (optional)", "")
+        st.subheader("1. Demographic Data")
+        age = st.number_input("Age", min_value=18, max_value=99, value=30, step=1)
+        gender = st.selectbox("Gender (optional)", ["No Information", "Female", "Male", "Diverse"])
+        job = st.text_input("Occupation (optional)", "")
 
-        st.subheader("2. Erfahrung & Wissen")
-        knowledge = st.slider("Wie gut schätzt du dein Finanzwissen ein?", 1, 5, 3)
+        st.subheader("2. Experience & Knowledge in Finance")
+        knowledge = st.slider("How would you rate your financial knowledge?", 1, 5, 3)
         experience = st.selectbox(
-            "Wie viel Anlageerfahrung hast du?",
-            ["Keine", "Wenig", "Mittel", "Viel"]
+            "How much investment experience do you have?",
+            ["None", "Little", "Medium", "A lot"]
         )
 
-        st.subheader("3. Ziele & Anlagehorizont")
+        st.subheader("3. Goals & Investment Horizon")
         goal = st.selectbox(
-            "Was ist dein Hauptziel beim Anlegen?",
-            ["Vermögensaufbau", "Einkommen/Dividenden", "Kapitalerhalt/Sicherheit", "Spekulation"]
+            "What is your main goal when investing?",
+            ["Wealth Accumulation", "Income/Dividends", "Capital Preservation/Security", "Speculation"]
         )
 
         invest_amount = st.number_input(
-            "Gedachtes Anlagevolumen (in CHF)",
+            "Intended investment volume (in CHF)",
             min_value=1000,
             max_value=1_000_000,
             value=10_000,
@@ -1709,34 +2265,34 @@ elif st.session_state.stage == "demographics":
         )
 
         amount_feel = st.selectbox(
-            "Wie gross fühlt sich dieser Betrag für dich an?",
-            ["Eher klein", "Mittlere Grössenordnung", "Sehr grosser Betrag für mich"]
+            "How large does this amount feel to you?",
+            ["Rather small", "Medium size", "Very large amount for me"]
         )
 
         current_investments = st.multiselect(
-            "In was hast du bisher investiert?",
-            ["Aktien", "Fonds/ETFs", "Obligationen", "Krypto", "Immobilien", "Cash", "Noch nichts"]
+            "What have you invested in so far?",
+            ["Stocks", "Funds/ETFs", "Bonds", "Crypto", "Real Estate", "Cash", "Nothing yet"]
         )
 
         horizon = st.selectbox(
-            "Anlagehorizont",
-            ["Kurzfristig (< 3 Jahre)", "Mittel (3–10 Jahre)", "Langfristig (> 10 Jahre)"]
+            "Investment horizon",
+            ["Short-term (< 3 years)", "Medium (3–10 years)", "Long-term (> 10 years)"]
         )
 
-        st.subheader("4. Selbstbild beim Risiko")
+        st.subheader("4. Self-assessment of Risk")
         stated_risk_raw = st.slider(
-            "Wie risikofreudig bist du (1 = sehr vorsichtig, 7 = sehr risikofreudig)?",
+            "How risk-tolerant are you (1 = very cautious, 7 = very risk-seeking)?",
             1, 7, 4
         )
         risk_constant = st.radio(
-            "Ist deine Risikoneigung deiner Meinung nach in allen Marktsituationen gleich?",
-            ["Ja", "Nein", "Weiss nicht"],
+            "In your opinion, is your risk tolerance the same in all market situations?",
+            ["Yes", "No", "Don't know"],
         )
 
-        submitted = st.form_submit_button("Zur Simulation")
+        submitted = st.form_submit_button("To Simulation")
 
     if submitted:
-        SR_norm = (stated_risk_raw - 1) / 6.0
+        SS_norm = (stated_risk_raw - 1) / 6.0
 
         st.session_state.demographics = {
             "age": age,
@@ -1750,53 +2306,57 @@ elif st.session_state.stage == "demographics":
             "current_investments": current_investments,
             "horizon": horizon,
             "stated_risk_raw": stated_risk_raw,
-            "stated_risk_norm": SR_norm,
+            "stated_risk_norm": SS_norm,
             "risk_constant_self_view": risk_constant,
         }
         st.session_state.stated_risk_raw = stated_risk_raw
         st.session_state.stage = "simulation"
+        st.session_state.scroll_top = True
         st.rerun()
 
 # ---------------------------------------------------------
-# Phase-Intro Texte
+# Phase intro texts
 # ---------------------------------------------------------
 def render_phase_intro(phase: str):
     invest_amount = st.session_state.demographics.get("invest_amount", 10_000)
 
     if phase == "calm":
-        title = "Phase 1 – Ruhiger Markt"
+        title = "Phase 1 – Calm Market"
         text = (
-            f"Die Wirtschaft wächst moderat, die Arbeitslosigkeit ist tief, und die Märkte schwanken nur leicht. "
-            f"Du hast ca. {invest_amount:,.0f} CHF, die du anlegen möchtest. "
-            "In den nächsten Fragen triffst du Entscheidungen in einem <b>ruhigen, stabilen Marktumfeld</b>."
+            f"The economy is growing moderately, unemployment is low, and markets fluctuate only slightly. "
+            f"You have approx. {invest_amount:,.0f} CHF that you want to invest. "
+            "In the following questions, you will make decisions in a <b>calm, stable market environment</b>."
         )
     elif phase == "boom":
-        title = "Phase 2 – Boom / Euphorie"
+        title = "Phase 2 – Boom / Euphoria"
         text = (
-            "Aktienindizes sind auf oder nahe Allzeithochs, Medien berichten von einer 'Super-Rallye'. "
-            "Dein Portfolio ist im Plus, das Umfeld fühlt sich optimistisch an. "
-            "In den nächsten Fragen entscheidest du im Kontext eines <b>überhitzten, euphorischen Marktes</b>."
+            "Stock indices are at or near all-time highs, media reports of a 'super rally'. "
+            "Your portfolio is in profit, the environment feels optimistic. "
+            "In the following questions, you decide in the context of an <b>overheated, euphoric market</b>."
         )
     else:
-        title = "Phase 3 – Krise / Crash"
+        title = "Phase 3 – Crisis / Crash"
         text = (
-            "Die Märkte sind stark gefallen, negative Schlagzeilen dominieren. "
-            "Dein investierter Betrag hat deutlich an Wert verloren. "
-            "In den nächsten Fragen entscheidest du in einem <b>stressigen Krisenumfeld</b>."
+            "Markets have fallen sharply, negative headlines dominate. "
+            "Your invested amount has lost significant value. "
+            "In the following questions, you decide in a <b>stressful crisis environment</b>."
         )
 
     st.subheader(title)
     st.markdown(f'<div class="neuro-phase-intro">{text}</div>', unsafe_allow_html=True)
-    st.write("Wenn du bereit bist, starte die Fragen zu dieser Marktphase.")
-    if st.button("Weiter zur ersten Frage in dieser Phase ▶"):
+    st.write("When you're ready, start the questions for this market phase.")
+    if st.button("Continue to first question in this phase ▶"):
         st.session_state.seen_phase_intros.add(phase)
+        st.session_state.scroll_top = True
         st.rerun()
 
 # ---------------------------------------------------------
 # UI: SIMULATION (wie bisherig)
 # ---------------------------------------------------------
 if st.session_state.stage == "simulation":
-    st.title("Markt-Simulation")
+    st.title("Market Simulation")
+
+
 
     idx = st.session_state.current_q_index
     total = len(SCENARIO_QUESTIONS)
@@ -1808,46 +2368,47 @@ if st.session_state.stage == "simulation":
         q = SCENARIO_QUESTIONS[idx]
         phase = q["phase"]
 
-        # Phase-Intro anzeigen, falls noch nicht gesehen
+        # Show phase intro if not seen yet
         if phase not in st.session_state.seen_phase_intros:
             render_phase_intro(phase)
             st.stop()
 
-        # Startzeit setzen, wenn neue Frage
+        # Set start time if new question
         if st.session_state.current_question_id != q["id"]:
             st.session_state.current_question_id = q["id"]
             st.session_state.question_start_time = time.time()
 
         phase_label = {
-            "calm": "Ruhiger Markt",
-            "boom": "Boom / Euphorie",
-            "crisis": "Krise / Crash"
+            "calm": "Calm Market",
+            "boom": "Boom / Euphoria",
+            "crisis": "Crisis / Crash"
         }.get(q["phase"], q["phase"])
 
-        st.markdown(f"**Frage {idx + 1} von {total}**")
-        st.markdown(f"**Marktsituation:** {phase_label}")
+        st.markdown(f"**Question {idx + 1} of {total}**")
+        st.markdown(f"**Market situation:** {phase_label}")
 
         invest_amount = st.session_state.demographics.get("invest_amount", 10_000.0)
 
-        # Dynamischer Fragetext für Q1 & Q2
+        # Dynamic question text for Q1 & Q2
         if q["id"] == 1:
             q_text = (
-                f"Die Märkte sind stabil, die Wirtschaft wächst moderat. "
-                f"Du hast **ca. {invest_amount:,.0f} CHF** zur Verfügung, die du anlegen möchtest. "
-                "Wie würdest du ihn jetzt investieren?"
+                f"Markets are stable, the economy is growing moderately. "
+                f"You have **approx. {invest_amount:,.0f} CHF** available to invest. "
+                "How would you invest it now?"
             )
         elif q["id"] == 2:
             bonus = 0.10 * invest_amount
+           
             q_text = (
-                f"Du erhältst einen **Bonus von ca. {bonus:,.0f} CHF** zusätzlich zu deinem ursprünglichen Betrag "
-                f"von ca. {invest_amount:,.0f} CHF. Wie viel dieses Bonusbetrags würdest du in Aktien investieren?"
+                f"You receive a **bonus of approx. {bonus:,.0f} CHF** in addition to your original amount "
+                f"of approx. {invest_amount:,.0f} CHF. How much of this bonus would you invest in stocks?"
             )
         else:
             q_text = q["question"]
 
         st.write(q_text)
 
-        # Option-Labels mit absoluten Beträgen (Rendite + Schwankung)
+        # Option labels with absolute values (return + volatility)
         def format_option_label(opt):
             base = opt["label"]
             mu = opt.get("mu")
@@ -1860,7 +2421,7 @@ if st.session_state.stage == "simulation":
                 ret_amt = invest_amount * mu / 100.0
                 vol_amt = invest_amount * sigma / 100.0
 
-                # +/- für Rendite je nach Vorzeichen
+                # +/- for return depending on sign
                 if mu > 0:
                     ret_str = f"≈ +{ret_amt:,.0f} CHF p.a."
                 elif mu < 0:
@@ -1871,31 +2432,32 @@ if st.session_state.stage == "simulation":
                 base = (
                     f"{base} "
                     f"({ret_str}; "
-                    f"Schwankung ca. ±{sigma:.0f}% ≈ ±{vol_amt:,.0f} CHF)"
+                    f"Volatility approx. ±{sigma:.0f}% ≈ ±{vol_amt:,.0f} CHF)"
                 )
             except Exception:
-                # Fallback: nur Basistext
+                # Fallback: only base text
                 pass
 
             return base
 
+        # Display plain labels only; risk ranks remain hidden
         display_labels = [format_option_label(opt) for opt in q["options"]]
 
         selected_index = st.radio(
-            "Wähle eine Option:",
+            "Choose an option:",
             options=list(range(len(display_labels))),
             format_func=lambda i: display_labels[i],
             index=0
         )
 
         advisor_help_used = st.checkbox(
-            "Ich würde hier gerne Hilfe von einer Beraterin / einem Berater haben.",
+            "I would like help from an advisor here.",
             key=f"help_{q['id']}"
         )
 
-        # Puls-Slider am Ende der Frage, unter den Antworten
+        # Pulse slider at end of question, below answers
         pulse_value = st.slider(
-            "Wenn du auf deine Smartwatch schaust: Wie hoch ist dein Puls gerade (bpm)?",
+            "If you look at your smartwatch: What is your current pulse (bpm)?",
             min_value=40,
             max_value=180,
             value=75,
@@ -1904,7 +2466,7 @@ if st.session_state.stage == "simulation":
 
         col1, col2 = st.columns([1, 1])
         with col1:
-            next_clicked = st.button("Weiter ▶", key=f"next_{q['id']}")
+            next_clicked = st.button("Continue ▶", key=f"next_{q['id']}")
         with col2:
             st.write("")
 
@@ -1913,15 +2475,20 @@ if st.session_state.stage == "simulation":
 
             chosen_opt = q["options"][selected_index]
 
-            sigmas = [opt["sigma"] for opt in q["options"]]
-            sigma_min = min(sigmas)
-            sigma_max = max(sigmas)
-            sigma_chosen = chosen_opt["sigma"]
-
-            if sigma_max > sigma_min:
-                x_risk_relative = (sigma_chosen - sigma_min) / (sigma_max - sigma_min)
+            # Compute risk from explicit risk_level (1..4); fallback to sigma rank if not provided
+            chosen_opt_risk_level = q["options"][selected_index].get("risk_level")
+            if isinstance(chosen_opt_risk_level, (int, float)):
+                # Normalize to [0,1] with 4 options
+                x_risk_relative = (float(chosen_opt_risk_level) - 1.0) / 3.0
             else:
-                x_risk_relative = 0.0
+                # Fallback: per-question ranking by sigma ascending
+                sigmas_with_index = [(opt.get("sigma", 0), idx) for idx, opt in enumerate(q["options"])]
+                sorted_by_sigma = sorted(sigmas_with_index, key=lambda t: t[0])
+                rank_map = {idx: (pos + 1) for pos, (_, idx) in enumerate(sorted_by_sigma)}
+                n_opts = len(q["options"]) 
+                denom = max(n_opts - 1, 1)
+                chosen_rank = rank_map.get(selected_index, 1)
+                x_risk_relative = (float(chosen_rank) - 1.0) / float(denom)
 
             prev_risk = (
                 st.session_state.responses[-1]["x_risk_relative"]
@@ -1929,20 +2496,28 @@ if st.session_state.stage == "simulation":
             )
             switch_action = 1 if abs(x_risk_relative - prev_risk) > 0.5 else 0
 
+            # NEW: Flag whether question is a real herding majority question
+            is_herd_majority_q = int(q.get("bias_tag") == "herding" and q.get("herd_majority") is not None)
+            
             follow_crowd = 0
-            if q.get("bias_tag") == "herding" and q.get("herd_majority") is not None:
+            if is_herd_majority_q == 1:
                 if chosen_opt["label"] == q["herd_majority"]:
                     follow_crowd = 1
+            
+            mu_val = chosen_opt.get("mu")
+            sigma_val = chosen_opt.get("sigma")
 
             resp = {
                 "q_id": q["id"],
                 "phase": q["phase"],
                 "question": q["question"],
                 "selected_label": chosen_opt["label"],
-                "mu": chosen_opt["mu"],
-                "sigma": chosen_opt["sigma"],
-                "x_objective_risk_mean": chosen_opt["mu"],
-                "x_objective_risk_std": chosen_opt["sigma"],
+                "mu": mu_val,
+                "sigma": sigma_val,
+                "risk_level": chosen_opt.get("risk_level"),
+                "risk_relevant": bool(q.get("risk_relevant", True)),
+                "x_objective_risk_mean": mu_val,
+                "x_objective_risk_std": sigma_val,
                 "x_risk_relative": x_risk_relative,
                 "x_reaction_time": reaction_time,
                 "x_pulse": float(pulse_value),
@@ -1952,36 +2527,34 @@ if st.session_state.stage == "simulation":
                 "switch_action": switch_action,
                 "bias_tag": q.get("bias_tag"),
                 "follow_crowd": follow_crowd,
+                "herd_majority_flag": is_herd_majority_q,  # NEW: Flag for actual herding questions
             }
 
             st.session_state.responses.append(resp)
             st.session_state.current_q_index += 1
             st.session_state.current_question_id = None
             st.session_state.question_start_time = None
+            st.session_state.rerun_needed = True
+            st.session_state.scroll_top = True
             st.rerun()
 
 
 # ---------------------------------------------------------
-# Peer-Vergleich: Laden, Filtern, Aggregieren
+# Peer comparison: Load, Filter, Aggregate
 # ---------------------------------------------------------
 def get_peer_stats(exclude_username=None, exclude_profile_id=None):
-    """Lade alle Profile (User + Gäste) für Peer-Vergleich.
-       Optional: einen username ODER eine profile_id ausschliessen.
+    """Load all profiles (users + guests) for peer comparison.
+       Guests: username = ''.
     """
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
     if exclude_profile_id:
-        c.execute(
-            "SELECT demographics, scores FROM profiles WHERE id != ?",
-            (exclude_profile_id,),
-        )
+        c.execute("SELECT demographics, scores FROM profiles WHERE id != ?", (exclude_profile_id,))
     elif exclude_username:
-        c.execute(
-            "SELECT demographics, scores FROM profiles WHERE (username != ? OR username IS NULL)",
-            (exclude_username,),
-        )
+        # Guests have username = '' (empty). We want all except the specified user.
+        c.execute("SELECT demographics, scores FROM profiles WHERE username != ?", (exclude_username,))
     else:
         c.execute("SELECT demographics, scores FROM profiles")
 
@@ -2001,27 +2574,27 @@ def get_peer_stats(exclude_username=None, exclude_profile_id=None):
 
 
 def filter_peer_data(all_data, age_buckets=None, goals=None, genders=None, regions=None):
-    """Filtere Peer-Daten nach Kriterien (Mehrfachauswahl unterstützt)."""
+    """Filter peer data by criteria (multiple selection supported)."""
     if not all_data:
         return []
 
     filtered = all_data[:]
 
-    # Alter: Buckets als Liste von Tupeln [(min,max), ...]
+    # Age: Buckets as list of tuples [(min,max), ...]
     if age_buckets:
         def in_any_bucket(age):
             return any((age >= a and age <= b) for (a, b) in age_buckets)
         filtered = [d for d in filtered if in_any_bucket(d["demo"].get("age", 0))]
 
-    # Anlageziel: OR-Logik über Liste
+    # Investment objective: OR logic over list
     if goals:
         filtered = [d for d in filtered if d["demo"].get("goal") in goals]
 
-    # Geschlecht: OR-Logik über Liste
+    # Gender: OR logic over list
     if genders:
         filtered = [d for d in filtered if d["demo"].get("gender") in genders]
 
-    # Region (optional, falls vorhanden)
+    # Region (optional, if available)
     if regions:
         filtered = [d for d in filtered if d["demo"].get("region") in regions]
 
@@ -2029,18 +2602,18 @@ def filter_peer_data(all_data, age_buckets=None, goals=None, genders=None, regio
 
 
 def calculate_aggregate_scores(filtered_data):
-    """Berechne Durchschnittswerte und Phasen‑Durchschnitte für Vergleichsgruppe."""
+    """Calculate average values and phase averages for comparison group."""
     if not filtered_data:
         return None
 
-    rcs_vals, srs_vals, rgs_vals, ans_vals = [], [], [], []
+    rcs_vals, SSS_vals, rgs_vals, ans_vals = [], [], [], []
     risk_by_phase = {"calm": [], "boom": [], "crisis": []}
     stress_by_phase = {"calm": [], "boom": [], "crisis": []}
 
     for d in filtered_data:
         s = d["scores"]
         rcs_vals.append(s.get("RCS", 50))
-        srs_vals.append(s.get("SRS", 50))
+        SSS_vals.append(s.get("SSS", 50))
         rgs_vals.append(s.get("RGS", 50))
         ans_vals.append(s.get("AdvisorNeedScore", 50))
 
@@ -2061,7 +2634,7 @@ def calculate_aggregate_scores(filtered_data):
     return {
         "count": len(filtered_data),
         "rcs_avg": avg(rcs_vals, 50),
-        "srs_avg": avg(srs_vals, 50),
+        "SSS_avg": avg(SSS_vals, 50),
         "rgs_avg": avg(rgs_vals, 50),
         "ans_avg": avg(ans_vals, 50),
         "risk_by_phase": {
@@ -2084,15 +2657,15 @@ def calculate_aggregate_scores(filtered_data):
 # UI: RESULTATE
 # ---------------------------------------------------------
 if st.session_state.stage == "results":
-    st.title("Dein NeuroRisk‑Profil 🧠")
+    st.title("Your NeuroRisk Profile 🧠")
 
     responses = st.session_state.responses
     demo = st.session_state.demographics
 
     if not responses:
-        st.warning("Keine Antworten gefunden – bitte starte die Simulation neu.")
-        if st.button("Zurück zur Simulation"):
-            # Nur Sim-Daten zurücksetzen; Login bleibt erhalten
+        st.warning("No responses found – please restart the simulation.")
+        if st.button("Back to Simulation"):
+            # Only reset sim data; keep login
             st.session_state.responses = []
             st.session_state.demographics = {}
             st.session_state.current_q_index = 0
@@ -2107,7 +2680,7 @@ if st.session_state.stage == "results":
     scores = compute_scores(demo, responses)
     df = pd.DataFrame(responses)
 
-    # Speichere Profil (NUR EINMAL mit Flag) — OHNE Erfolgsmeldung
+    # Save profile (ONLY ONCE with flag) — WITHOUT success message
     if not st.session_state.get("profile_saved"):
         if st.session_state.get("logged_in_user"):
             username = st.session_state.logged_in_user
@@ -2115,14 +2688,14 @@ if st.session_state.stage == "results":
                 st.session_state.profile_saved = True
                 # ← Erfolgsmeldung entfernt!
 
-    # Header mit Willkommensmeldung + Optionen (nur bei eingeloggtem User)
+    # Header with welcome message + options (only for logged-in user)
     if st.session_state.get("logged_in_user"):
         username = st.session_state.logged_in_user
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown(
             f"""
             <div style="background-color: {PRIMARY_COLOR}; color: white; padding: 1.5rem; border-radius: 0.75rem; text-align: center;">
-            <h3 style="margin: 0; color: white;">{username} hier ist dein Risikoprofil 📊</h3>
+            <h3 style="margin: 0; color: white;">{username}, here is your risk profile 📊</h3>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2131,11 +2704,11 @@ if st.session_state.stage == "results":
 
 
 
- # Buttons schön in einer Zeile
+ # Buttons nicely in one line
     col1, col2 = st.columns(2)
 
     with col1:
-        if st.button("Neue Simulation starten", key="new_sim_results", width="stretch"):
+        if st.button("Start New Simulation", key="new_sim_results", width='stretch'):
             st.session_state.responses = []
             st.session_state.demographics = {}
             st.session_state.current_q_index = 0
@@ -2144,152 +2717,172 @@ if st.session_state.stage == "results":
             st.session_state.seen_phase_intros = set()
             st.session_state.profile_saved = False
             st.session_state.stage = "demographics"
+            st.session_state.scroll_top = True
             st.rerun()
 
     with col2:
         if st.session_state.get("logged_in_user"):
-            if st.button("Logout", key="logout_button", width="stretch"):
+            if st.button("Logout", key="logout_button", width='stretch'):
                 st.session_state.logged_in_user = None
                 st.session_state.stage = "home"
+                st.session_state.scroll_top = True
                 st.rerun()   
 
     
-    # Speichere auch Gast-Sessions
+    # Save guest sessions
     if not st.session_state.get("profile_saved"):
         if not st.session_state.get("logged_in_user"):
-            # Gast-Session speichern und profile_id speichern
+            # Save guest session and profile_id
             profile_id = save_guest_profile(demo, responses, scores)
             if profile_id:
                 st.session_state.profile_saved = True
                 st.session_state.saved_profile_id = profile_id
 
 
-    # --- Chart 1: Risiko-Verlauf (ohne Filter) ---
-    st.subheader("1. Risiko‑Verlauf" if not st.session_state.get("logged_in_user") else "1. Dein Risiko‑Verlauf")
-    risk_df = pd.DataFrame({
-        "Marktphase": PHASE_ORDER,
-        "Risiko (0 = vorsichtig, 1 = risikofreudig)": [scores["risk_by_phase"].get(p, 0.0) for p in PHASE_ORDER]
-    })
-    risk_chart = (
-        alt.Chart(risk_df)
-        .mark_line(point=True, color="black")
-        .encode(
-            x=alt.X("Marktphase:N", title="Marktphase (Ruhig / Boom / Krise)"),
-            y=alt.Y(
-                "Risiko (0 = vorsichtig, 1 = risikofreudig):Q",
-                title="Durchschnittliches Risiko (0 = vorsichtig, 1 = risikofreudig)",
-                scale=alt.Scale(domain=[0,1])
-            ),
+    # --- Chart 1: Biometrics ---
+    st.subheader("1. Biometrics")
+
+    biometrics = df.groupby("phase")[["x_pulse", "x_reaction_time"]].mean().reindex(PHASE_ORDER)
+    biometrics = biometrics.rename(columns={"x_pulse": "Average Pulse (bpm)", "x_reaction_time": "Average Reaction Time (s)"}).reset_index()
+    biometrics["Market Phase"] = biometrics["phase"].map({"calm": "Calm", "boom": "Boom", "crisis": "Crisis"})
+
+    # Short finding at bottom in section 3 incl. explanation & formula
+    st.markdown("""
+    Here you can see your average pulse (bpm) and average reaction time (seconds) per market phase.
+    Higher values indicate stronger physiological stress, which can manifest as stress and tension.
+    """)
+
+    # Charts next to each other
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**Pulse**")
+        pulse_chart = (
+            alt.Chart(biometrics)
+            .mark_bar(color=PRIMARY_COLOR)
+            .encode(
+                x=alt.X("Market Phase:N", title="Market Phase"),
+                y=alt.Y("Average Pulse (bpm):Q", title="Average Pulse (bpm)"),
+                tooltip=[alt.Tooltip("Market Phase:N"), alt.Tooltip("Average Pulse (bpm):Q", format=".0f")]
+            )
+            .properties(height=200)
         )
-    )
-    st.altair_chart(risk_chart, use_container_width=True)
+        st.altair_chart(pulse_chart, width='stretch')
 
-    # --- Chart 2: Stress-Verlauf ---
-    st.subheader("2. Stress‑Verlauf")
+    with col_b:
+        st.markdown("**Reaction Time**")
+        rt_chart = (
+            alt.Chart(biometrics)
+            .mark_bar(color=PRIMARY_COLOR)
+            .encode(
+                x=alt.X("Market Phase:N", title="Market Phase"),
+                y=alt.Y("Average Reaction Time (s):Q", title="Average Reaction Time (s)"),
+                tooltip=[alt.Tooltip("Market Phase:N"), alt.Tooltip("Average Reaction Time (s):Q", format=".2f")]
+            )
+            .properties(height=200)
+        )
+        st.altair_chart(rt_chart, width='stretch')
 
-    # Roh‑z‑Scores pro Phase (können negativ/positiv sein)
+    st.table(biometrics[["Market Phase", "Average Pulse (bpm)", "Average Reaction Time (s)"]].style.format({
+        "Average Pulse (bpm)": "{:.0f}",
+        "Average Reaction Time (s)": "{:.2f}"
+    }))
+
+    # Additional line: Facial expressions & Eye movements (Coming Soon) – two boxes side by side
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        render_coming_soon_card("Facial Expressions", "Coming soon")
+    with col_c2:
+        render_coming_soon_card("Eye Movements", "Coming soon")
+
+    # --- Chart 2: Stress Progression ---
+    st.subheader("2. Stress Progression")
+    
+    # z-score stress per phase (display directly, without 0..1 normalization)
     raw_stress = [scores["stress_by_phase"].get(p, 0.0) for p in PHASE_ORDER]
 
-    # Normalisierung für die Visualisierung: 0..1 (clamped)
-    s_min = min(raw_stress)
-    s_max = max(raw_stress)
-    if s_max - s_min == 0:
-        stress_norm = [0.5 for _ in PHASE_ORDER]
-    else:
-        stress_norm = [max(0.0, min(1.0, (v - s_min) / (s_max - s_min))) for v in raw_stress]
-
     stress_df = pd.DataFrame({
-        "Marktphase": PHASE_ORDER,
-        "Stress (normalisiert)": stress_norm,
+        "Market Phase": PHASE_ORDER,
         "Stress (zscore)": raw_stress
     })
 
     stress_chart = (
         alt.Chart(stress_df)
-        .mark_line(point=True, color="black")
+        .mark_line(point=True, color=PRIMARY_COLOR)
         .encode(
-            x=alt.X("Marktphase:N", title="Marktphase"),
-            y=alt.Y("Stress (normalisiert):Q", title="Stress (0 = niedrigste, 1 = höchste gemessene Belastung)", scale=alt.Scale(domain=[0,1])),
-            tooltip=[alt.Tooltip("Marktphase:N", title="Phase"),
-                     alt.Tooltip("Stress (zscore):Q", title="Stress (z‑score)", format=".2f"),
-                     alt.Tooltip("Stress (normalisiert):Q", title="Stress (normalisiert)", format=".2f")]
+            x=alt.X("Market Phase:N", title="Market Phase"),
+            y=alt.Y(
+                "Stress (zscore):Q",
+                title="Stress Index (0 = your average, >0 = more stress, <0 = less stress)",
+                scale=alt.Scale(domain=[-2, 2])
+            ),
+            tooltip=[alt.Tooltip("Market Phase:N", title="Phase"),
+                     alt.Tooltip("Stress (zscore):Q", title="Stress (z-score)", format=".2f")]
         )
+        .properties(height=400)  
     )
-    st.altair_chart(stress_chart, use_container_width=True)
+    st.altair_chart(stress_chart, width='stretch')
 
-    st.caption("Skalierung: 0 = geringste gemessene Belastung in deinen Phasen, 1 = höchste. Tooltip zeigt rohe z‑Scores (Standardwerte).")
+    st.markdown("""
+    The stress score per decision is calculated as a weighted combination of z-scores from reaction time and pulse:
+    Stress_i = 0.6 · z(Reaction Time) + 0.4 · z(Pulse). The stress is then averaged over all questions per market phase.
+    """)
 
-    # --- Chart 3: Biometrie (NUR EINMAL) ---
-    st.subheader("3. Biometrie: Puls & Reaktionszeit pro Marktphase")
 
-    biometrics = df.groupby("phase")[["x_pulse", "x_reaction_time"]].mean().reindex(PHASE_ORDER)
-    biometrics = biometrics.rename(columns={"x_pulse": "Durchschnittspuls (bpm)", "x_reaction_time": "Durchschnittliche Reaktionszeit (s)"}).reset_index()
-    biometrics["Marktphase"] = biometrics["phase"].map({"calm": "Ruhig", "boom": "Boom", "crisis": "Krise"})
-
-    # Tabelle
-    st.table(biometrics[["Marktphase", "Durchschnittspuls (bpm)", "Durchschnittliche Reaktionszeit (s)"]].style.format({
-        "Durchschnittspuls (bpm)": "{:.0f}",
-        "Durchschnittliche Reaktionszeit (s)": "{:.2f}"
-    }))
-
-    # Charts nebeneinander
-    col_a, col_b = st.columns(2)
-    with col_a:
-        pulse_chart = (
-            alt.Chart(biometrics)
-            .mark_bar(color=PRIMARY_COLOR)
-            .encode(
-                x=alt.X("Marktphase:N", title="Marktphase"),
-                y=alt.Y("Durchschnittspuls (bpm):Q", title="Durchschnittspuls (bpm)"),
-                tooltip=[alt.Tooltip("Marktphase:N"), alt.Tooltip("Durchschnittspuls (bpm):Q", format=".0f")]
-            )
-            .properties(height=200)
+    # --- Chart 3: Risk Progression (no filter) ---
+    st.subheader("3. Risk Progression")
+    risk_df = pd.DataFrame({
+        "Market Phase": PHASE_ORDER,
+        "Risk (0 = cautious, 1 = risk-seeking)": [scores["risk_by_phase"].get(p, 0.0) for p in PHASE_ORDER]
+    })
+    risk_chart = (
+        alt.Chart(risk_df)
+        .mark_line(point=True, color=PRIMARY_COLOR)
+        .encode(
+            x=alt.X("Market Phase:N", title="Market Phase"),
+            y=alt.Y(
+                "Risk (0 = cautious, 1 = risk-seeking):Q",
+                title="Risk (0 = cautious, 1 = risk-seeking)",
+                scale=alt.Scale(domain=[0,1])
+            ),
         )
-        st.altair_chart(pulse_chart, use_container_width=True)
+        .properties(height=400)  # same height as stress chart
+    )
+    st.altair_chart(risk_chart, width='stretch')
+    
+    st.markdown("""
+    The risk score per decision is calculated from the relative riskiness rank of the chosen option within the question.
+    By default, options are ranked 1..4 (1 = least risky, 4 = most risky). Risk_i = (risk_level − 1) / 3.0  → normalized to [0,1].
+    The risk value is then averaged over all questions per market phase (0 = cautious, 1 = risk-seeking).
+    """)
 
-    with col_b:
-        rt_chart = (
-            alt.Chart(biometrics)
-            .mark_bar(color="#04293A")
-            .encode(
-                x=alt.X("Marktphase:N", title="Marktphase"),
-                y=alt.Y("Durchschnittliche Reaktionszeit (s):Q", title="Durchschnittliche Reaktionszeit (s)"),
-                tooltip=[alt.Tooltip("Marktphase:N"), alt.Tooltip("Durchschnittliche Reaktionszeit (s):Q", format=".2f")]
-            )
-            .properties(height=200)
-        )
-        st.altair_chart(rt_chart, use_container_width=True)
-
-    st.markdown("**Kurzbefund:** Tabelle und Charts zeigen deinen mittleren Puls (bpm) und die durchschnittliche Reaktionszeit (Sekunden) in jeder Marktphase.")
-
-    # --- Scores (wie bisherig) ---
-    st.subheader("4. Kennzahlen (Scores)")
+    # --- Scores (as before) ---
+    st.subheader("4. Key Metrics (Scores)")
 
     def score_color_and_label(name, value, better_high=True):
         """Return HTML color and short interpretation for score."""
         val = float(value)
         if better_high:
-            # green high
+            # high is good → green
             if val >= 75:
                 color = "#16a34a"  # green
-                label = "gut — konsistent/robust"
+                label = "good — consistent/robust"
             elif val >= 50:
-                color = "#f59e0b"  # amber
-                label = "moderat — teilweise variabel"
+                color = "#2563eb"  # blue (instead of orange)
+                label = "moderate — partially variable"
             else:
-                color = "#dc2626"  # red
-                label = "niedrig — erhöhte Variabilität"
+                color = "#f59e0b"  # orange (instead of red)
+                label = "low — increased variability"
         else:
-            # low is good
+            # low is good → green
             if val <= 25:
-                color = "#16a34a"
-                label = "gut — geringes Problem"
+                color = "#16a34a"  # green
+                label = "good — low problem"
             elif val <= 50:
-                color = "#f59e0b"
-                label = "moderat — beobachtbar"
+                color = "#2563eb"  # blue (instead of orange)
+                label = "moderate — observable"
             else:
-                color = "#dc2626"
-                label = "hoch — Handlungsbedarf möglich"
+                color = "#f59e0b"  # orange (instead of red)
+                label = "high — possible need for action"
         return color, label
 
     def render_score_card(title, score_val, desc, better_high=True):
@@ -2309,163 +2902,258 @@ if st.session_state.stage == "results":
         render_score_card(
             "Risk Consistency Score",
             scores["RCS"],
-            "Wie gleichbleibend du bei Risiko bist. Höher = stabiler.",
+            "How consistent you are with risk – across market phases. Higher = more stable.",
             better_high=True,
         )
         render_score_card(
             "Reality Gap Score",
             scores["RGS"],
-            "Unterschied zwischen Selbstbild und tatsächlichem Verhalten. Niedriger = besser.",
+            "Difference between self-image and actual behavior. Lower = better.",
             better_high=False,
         )
     with col2:
         render_score_card(
-            "Stress Resilience Score",
-            scores["SRS"],
-            "Wie konstant dein Stress ist. Höher = besser.",
+            "Stress Stability Score",
+            scores["SSS"],
+            "How consistent your stress is – across market phases. Higher = better.",
             better_high=True,
         )
         render_score_card(
             "Advisor Need Score",
             scores["AdvisorNeedScore"],
-            "Abschätzung, ob externe Beratung hilfreich sein könnte. Niedriger = weniger Bedarf.",
+            "Estimate of whether external advice could be helpful. Lower = less need.",
             better_high=False,
         )
 
-    # --- Bias-Interpretationen (wie bisherig) ---
-    st.subheader("5. Interpretation & Bias-Karten")
+    # --- Bias interpretations (as before) ---
+    st.subheader("5. Bias Cards")
+
 
     # Loss Aversion
     la = scores["loss_aversion_proxy"]
     if la > 0.2:
-        st.info("🧩 **Loss Aversion:** Du verhältst dich in Boom-Phasen deutlich risikoreicher als in Krisen. "
-                "Das deutet auf eine ausgeprägte Verlustaversion hin.")
+        st.info("🧩 **Loss Aversion:** You behave significantly more risk-seeking in boom phases than in crises. "
+                "This indicates pronounced loss aversion.")
     elif la > 0.05:
-        st.info("🧩 **Loss Aversion:** Leichte Tendenz zur Verlustvermeidung in Krisen – insgesamt moderat.")
+        st.info("🧩 **Loss Aversion:** Slight tendency toward loss avoidance in crises – overall moderate.")
     else:
-        st.info("🧩 **Loss Aversion:** Deine Risikowahl unterscheidet sich kaum zwischen Boom und Krise – eher geringe Loss Aversion.")
+        st.info("🧩 **Loss Aversion:** Your risk choices hardly differ between boom and crisis – rather low loss aversion.")
 
     # Herding
     herd_score = scores["herding_score"]
     if herd_score > 70:
-        st.warning("👥 **Herding-Neigung:** Du folgst häufig der Mehrheit. "
-                   "Achte darauf, Entscheidungen nicht nur an 'alle machen es' auszurichten.")
+        st.warning("👥 **Herding Tendency:** You often follow the majority. "
+                   "Make sure not to base decisions solely on 'everyone does it'.")
     elif herd_score > 30:
-        st.info("👥 **Herding-Neigung:** Moderate Tendenz, dich an der Mehrheit zu orientieren.")
+        st.info("👥 **Herding Tendency:** Moderate tendency to orient yourself toward the majority.")
     else:
-        st.success("👥 **Herding-Neigung:** Geringe Tendenz zum Herding – du triffst relativ eigenständige Entscheidungen.")
+        st.success("👥 **Herding Tendency:** Low tendency to herd – you make relatively independent decisions.")
 
     # Disposition Effect
-    if scores["disposition"] == "hoch":
-        st.warning("💰 **Disposition Effect:** Du neigst dazu, Gewinne schnell komplett zu realisieren. "
-                   "Langfristig kann das dazu führen, dass du Aufwärtspotenzial verpasst.")
-    elif scores["disposition"] == "mittel":
-        st.info("💰 **Disposition Effect:** Tendenz, bei Gewinnen eher zu verkaufen – normal, aber beobachtbar.")
+    if scores["disposition"] == "high":
+        st.warning("💰 **Disposition Effect:** You tend to realize gains quickly and completely. "
+                   "Long-term, this can cause you to miss upside potential.")
+    elif scores["disposition"] == "medium":
+        st.info("💰 **Disposition Effect:** Tendency to sell on gains – normal, but observable.")
 
-    elif scores["disposition"] == "leicht":
-        st.info("💰 **Disposition Effect:** Leichter Hang zum Gewinnmitnehmen, insgesamt ausgewogen.")
-    elif scores["disposition"] == "niedrig":
-        st.success("💰 **Disposition Effect:** Du lässt Gewinne relativ laufen – wenig Tendenz zu vorschnellem Realisieren.")
+    elif scores["disposition"] == "slight":
+        st.info("💰 **Disposition Effect:** Slight inclination to take profits, overall balanced.")
+    elif scores["disposition"] == "low":
+        st.success("💰 **Disposition Effect:** You let gains run relatively – little tendency for premature realization.")
 
     # Recency / Hindsight
-    if scores["recency"] == "stark_negativ":
-        st.warning("⏳ **Recency Bias:** Nach kurzfristigen Verlusten reagierst du sehr defensiv. "
-                   "Das kann zu emotionalen Verkäufen führen.")
-    elif scores["recency"] == "moderat":
-        st.info("⏳ **Recency Bias:** Deine Reaktion auf kurzfristige Verluste ist moderat.")
-    elif scores["recency"] == "resilient_proaktiv":
-        st.success("⏳ **Recency Bias:** Du bleibst nicht nur ruhig, sondern nutzt Rückgänge teilweise aktiv.")
+    if scores["recency"] == "strong_negative":
+        st.warning("⏳ **Recency Bias:** After short-term losses, you react very defensively. "
+                   "This can lead to emotional sales.")
+    elif scores["recency"] == "moderate":
+        st.info("⏳ **Recency Bias:** Your reaction to short-term losses is moderate.")
+    elif scores["recency"] == "resilient_proactive":
+        st.success("⏳ **Recency Bias:** You not only stay calm, but also actively use declines in part.")
     elif scores["recency"] == "resilient":
-        st.success("⏳ **Recency Bias:** Kurzfristige Verluste scheinen dein Verhalten kaum zu dominieren.")
+        st.success("⏳ **Recency Bias:** Short-term losses seem to hardly dominate your behavior.")
 
-    if scores["hindsight"] == "hoch":
-        st.warning("🔁 **Hindsight / Regret:** Du würdest deine Strategie im Rückblick klar defensiver wählen. "
-                   "Das kann auf hohen emotionalen Rückblickdruck hindeuten.")
-    elif scores["hindsight"] == "moderat":
-        st.info("🔁 **Hindsight / Regret:** Du würdest einige, aber nicht alle Entscheidungen ändern.")
-    elif scores["hindsight"] == "offensiver":
-        st.info("🔁 **Hindsight:** Im Rückblick wärst du sogar offensiver gewesen – du akzeptierst Schwankungen relativ gut.")
-    elif scores["hindsight"] == "gering":
-        st.success("🔁 **Hindsight / Regret:** Du würdest deine Strategie im Rückblick kaum ändern.")
+    hindsight = scores.get("hindsight")
+    if hindsight == "high":
+        st.warning("🔁 **Hindsight / Regret:** You would clearly choose your strategy more defensively in hindsight. "
+                   "This can indicate high emotional retrospective pressure.")
+    elif hindsight == "moderate":
+        st.info("🔁 **Hindsight / Regret:** You would change some, but not all, decisions.")
+    elif hindsight == "aggressive":
+        st.info("🔁 **Hindsight:** In hindsight, you would have been even more aggressive – you accept volatility relatively well.")
+    elif hindsight == "low":
+        st.success("🔁 **Hindsight / Regret:** You would hardly change your strategy in hindsight.")
 
-    # Overconfidence (Proxy)
-    oc = scores["OverconfidenceScore"]
-    if oc > 60:
-        st.warning("🚀 **Overconfidence:** Dein Selbstbild, deine Konsistenz und dein Stressverhalten deuten auf "
-                   "eine erhöhte Selbstüberschätzung hin – besonders in guten Marktphasen.")
-    elif oc > 30:
-        st.info("🚀 **Overconfidence:** Leichte Tendenz zu Overconfidence – grundsätzlich normal, aber beobachtbar.")
+    st.markdown("""
+    <div class="neuro-card" style="background:#fff;">
+
+      <span style="color:#16a34a;">Green</span>: positive/uncritical·
+      <span style="color:#2563eb;">Blue</span>: neutral ·
+      <span style="color:#f59e0b;">Orange</span>: observe/critical
+    </div>
+    """, unsafe_allow_html=True)
+
+    # --- Investment Profile (new logic) ---
+    st.subheader("6. Risk Character")
+
+    risk_level = classify_risk_level(scores["BR"])
+    stability_profile = classify_stability_profile(scores["RCS"], scores["SSS"])
+    combined_title = f"{risk_level}, {stability_profile}"
+
+    # Save combined name for PDF export
+    risk_type = combined_title
+
+    # Brief description and tips per archetype
+    desc_map = {
+        "Calm & Consistent Investor": {
+            "desc": "Makes relatively similar risk decisions across all market phases. Physical signals remain stable.",
+            "tips": [
+                "Define long-term target allocation and consistently rebalance.",
+                "Set clear rules and automate (e.g., savings plans, rebalancing).",
+                "Watch for overconfidence – regular position checks."
+            ],
+        },
+        "Calm Outside, Storm Inside": {
+            "desc": "Decisions are stable, but stress indicators rise significantly in boom/crisis.",
+            "tips": [
+                "Schedule regular psychological check-ins.",
+                "Discuss drawdown scenarios in advance, avoid surprises.",
+                "Build liquidity reserve/buffer, slightly more defensive than theoretically tolerable."
+            ],
+        },
+        "Flexible, but relaxed": {
+            "desc": "Risk decisions jump between phases, stress remains calm.",
+            "tips": [
+                "Strengthen strategy discipline: clear guardrails for when NOT to reallocate.",
+                "Define and stick to long-term target risk level.",
+                "Use auto-rebalancing/savings plans, reduce spontaneous moves."
+            ],
+        },
+        "Emotional Swing Investor": {
+            "desc": "Risk and stress vary greatly between Calm/Boom/Crisis. Danger of procyclical behavior.",
+            "tips": [
+                "Close guidance and clear decision rules instead of ad-hoc.",
+                "More structure: robust, psychologically tolerable portfolios.",
+                "Use bank coaching/education modules."
+            ],
+        },
+    }
+
+    profile_info = desc_map.get(stability_profile, {"desc": "", "tips": []})
+    tips_html = "".join(f"<li>{t}</li>" for t in profile_info["tips"])
+
+    profile_box_html = f"""
+    <div class="neuro-card" style="background:#fff;">
+      <div style="font-size:1.1rem;margin:.25rem 0;color:#06436D;"><b>{combined_title}</b></div>
+      <p style="margin:.5rem 0;color:#374151;">– {profile_info['desc']}</p>
+      <ul style="margin:.5rem 0 .25rem 1rem;color:#374151;">
+        {tips_html}
+      </ul>
+    </div>
+    """
+    st.markdown(profile_box_html, unsafe_allow_html=True)
+
+    # Optional: Derive Advisor Need Flag from score
+    ans = float(scores.get("AdvisorNeedScore", 50))
+    if ans >= 66:
+        advisor_flag = "high"
+    elif ans >= 40:
+        advisor_flag = "medium"
     else:
-               st.success("🚀 **Overconfidence:** Keine starke Tendenz zu Overconfidence ersichtlich.")
+        advisor_flag = "low"
+    st.markdown(f"<div class='neuro-card' style='background:#fff;'>📌 Advisor Need: <b>{advisor_flag}</b></div>", unsafe_allow_html=True)
 
-    # Reality Gap
-    SR = scores["SR"]
-    BR = scores["BR"]
-    if abs(SR - BR) > 0.3:
-        st.warning("🪞 **Reality Gap:** Dein Selbstbild ('Wie risikofreudig bin ich?') "
-                   "weicht deutlich von deinem tatsächlichen Verhalten in der Simulation ab.")
-    else:
-        st.success("🪞 **Reality Gap:** Dein Selbstbild und dein Verhalten in der Simulation sind relativ gut im Einklang.")
+    # Matrix chart (RCS vs. SSS), 0-100 scale, square, thresholds at 40 & 70
+    st.markdown("**Risk Consistency Score (RCS) × Stress Stability Score (SSS) Matrix**")
 
-    # --- Anlageprofil (wie bisherig) ---
-    st.subheader("6. Anlageprofil")
+    point_df = pd.DataFrame({
+        "Dimension": ["Your Profile"],
+        "RCS": [scores["RCS"]],
+        "SSS": [scores["SSS"]],
+    })
 
-    BR_val = scores["BR"]
-    if BR_val < 0.33:
-        risk_type = "Defensiver Anleger"
-    elif BR_val < 0.66:
-        risk_type = "Ausgewogener Anleger"
-    else:
-        risk_type = "Dynamischer Anleger"
 
-    st.write(f"**Profil:** {risk_type}")
+    bg_df = pd.DataFrame({
+        "x1": [0,   50,  0,  50],
+        "x2": [50, 100, 50, 100],
+        "y1": [50,  50,  0,   0],
+        "y2": [100,100, 50,  50],
+        "Label": [
+            "Low RCS / High SSS",
+            "High RCS / High SSS",
+            "Low RCS / Low SSS",
+            "High RCS / Low SSS",
+        ],
+        "color": ["#2564eb32", "#16a34a3f", "#efc57e4b", "#2564eb32"] 
+    })
 
-    # Profil-Box mit beschreibungen (ohne konkrete Prozent-Angaben)
-    if risk_type == "Defensiver Anleger":
-        prof_html = """
+    bg_layer = (
+        alt.Chart(bg_df)
+        .mark_rect()
+        .encode(
+            x=alt.X("x1:Q", title="Risk Consistency Score (RCS)", scale=alt.Scale(domain=[0, 100])),
+            x2="x2:Q",
+            y=alt.Y("y1:Q", title="Stress Stability Score (SSS)", scale=alt.Scale(domain=[0, 100])),
+            y2="y2:Q",
+            color=alt.Color("color:N", scale=None, legend=None),
+        )
+    )
 
-        <div class="neuro-card">
-        <strong>Defensiver Anleger</strong>
-        <ul>
-            <li>Bevorzugt Kapitalerhalt und geringe Schwankungen.</li>
-            <li>Wählt eher sichere Instrumente und reduziert Risiko in unsicheren Phasen.</li>
-            <li>Geeignet, wenn kurzfristige Verluste emotional stark belasten.</li>
-        </ul>
-        </div>
-        """
-    elif risk_type == "Ausgewogener Anleger":
-        prof_html = """
-        <div class="neuro-card">
-        <strong>Ausgewogener Anleger</strong>
-        <ul>
-            <li>Sucht Balance zwischen Wachstumschancen und Risiko.</li>
-            <li>Reagiert moderat auf Marktveränderungen, nutzt Likely sowohl Aktien- als auch sicherere Anlagen.</li>
-            <li>Geeignet für einen mittelfristigen Anlagehorizont mit kontrollierter Volatilität.</li>
-        </ul>
-        </div>
-        """
-    else:
-        prof_html = """
-        <div class="neuro-card">
-        <strong>Dynamischer Anleger</strong>
-        <ul>
-            <li>Akzeptiert höhere Schwankungen zugunsten größerer Chancen.</li>
-            <li>Ist eher langfristig orientiert oder emotional belastbar bei Rückschlägen.</li>
-            <li>Kann in Boom‑Phasen stärker zulegen, reagiert aber in Krisen möglicherweise emotionaler.</li>
-        </ul>
-        </div>
-        """
+    # Threshold lines at 50 (consistent with classification)
+    rules = (
+        alt.Chart(pd.DataFrame({"pos": [50]}))
+        .mark_rule(color="#6b7280", strokeDash=[6, 4])
+        .encode(x="pos:Q")
+    ) + (
+        alt.Chart(pd.DataFrame({"pos": [50]}))
+        .mark_rule(color="#6b7280", strokeDash=[6, 4])
+        .encode(y="pos:Q")
+    )
 
-    st.markdown(prof_html, unsafe_allow_html=True)
+    # Profile point
+    point_layer = (
+        alt.Chart(point_df)
+        .mark_circle(size=420, color=PRIMARY_COLOR)
+        .encode(
+            x=alt.X("RCS:Q", scale=alt.Scale(domain=[0, 100])),
+            y=alt.Y("SSS:Q", scale=alt.Scale(domain=[0, 100])),
+            tooltip=[
+                alt.Tooltip("RCS:Q", format=".0f"),
+                alt.Tooltip("SSS:Q", format=".0f"),
+                alt.Tooltip("Dimension:N"),
+            ],
+        )
+    )
 
-    # --- PEER-VERGLEICH SECTION ---
+    # Square representation (fixed width/height)
+    matrix_chart = (bg_layer + rules + point_layer).properties(width=500, height=500)
+    st.altair_chart(matrix_chart, width='content')
+
+    render_coming_soon_card(
+        "AI Clustering Analysis (15 Risk Characters)",
+        "Coming soon"
+    )
+
+    st.subheader("7. Interpretation")
+    render_coming_soon_card("AI Analysis of your profile", "Coming soon")
+
+    # --- NEW: 8. What-if Analyses ---
     st.markdown("---")
-    st.subheader("7. Vergleich mit anderen Nutzenden")
+    st.subheader("8. What-if Analyses")
+    col_w1, col_w2, col_w3 = st.columns(3)
+    with col_w1:
+        render_coming_soon_card("AI Prediction of your Stresslevel", "Coming soon")
+    with col_w2:
+        render_coming_soon_card("AI Prediction of your Panic Probability", "Coming soon")
+    with col_w3:
+        render_coming_soon_card("AI Prediction of your Product Misspecification", "Coming soon")
+
+    st.markdown("---")
+    st.subheader("9. Comparison with Other Users")
     
-    # Bestimme, welche Profile wir beim Laden ausschliessen sollen
-    # WICHTIG: Immer über profile_id ausschliessen, um ALLE anderen Profile zu laden (User + Gäste)
+    # Determine which profiles to exclude when loading
+    # IMPORTANT: Always exclude via profile_id to load ALL other profiles (users + guests)
     if st.session_state.get("logged_in_user"):
-        # Beim eingeloggten User: Lade das neueste Profil, um dessen ID zu erhalten
+        # For logged in user: Load newest profile to get its ID
         username = st.session_state.logged_in_user
         conn = sqlite3.connect(DB_FILE)
         conn.row_factory = sqlite3.Row
@@ -2481,33 +3169,33 @@ if st.session_state.stage == "results":
             excl_id = user_profile_row["id"]
             all_peer_data = get_peer_stats(exclude_profile_id=excl_id)
         else:
-            # Kein gespeichertes Profil → zeige alle
+            # No saved profile → show all
             all_peer_data = get_peer_stats()
     else:
-        # Wenn Gast: versuche die gerade gespeicherte profile_id auszuschliessen (falls vorhanden)
+        # If guest: try to exclude the just-saved profile_id (if available)
         excl_id = st.session_state.get("saved_profile_id")
         all_peer_data = get_peer_stats(exclude_profile_id=excl_id) if excl_id else get_peer_stats()
     
     if all_peer_data and len(all_peer_data) > 0:
-        with st.expander("🔍 Filter & Peer-Vergleich", expanded=False):
-            st.write(f"**Totale Anzahl an Risk Profilen:** {len(all_peer_data)}")
+        with st.expander("🔍 Filter & Peer Comparison", expanded=False):
+            st.write(f"**Total Number of Risk Profiles:** {len(all_peer_data)}")
             
-            # Multiselect-Filter
+            # Multiselect filters
             col_f1, col_f2, col_f3 = st.columns(3)
 
             with col_f1:
                 age_opts = ["18-25", "26-35", "36-45", "46-55", "56-65", "65+"]
-                age_sel = st.multiselect("Alter (Mehrfachauswahl)", age_opts)
+                age_sel = st.multiselect("Age (Multiple Selection)", age_opts)
 
             with col_f2:
-                gender_opts = ["Weiblich", "Männlich", "Divers", "Keine Angabe"]
-                gender_sel = st.multiselect("Geschlecht (Mehrfachauswahl)", gender_opts)
+                gender_opts = ["Female", "Male", "Diverse", "No Information"]
+                gender_sel = st.multiselect("Gender (Multiple Selection)", gender_opts)
 
             with col_f3:
-                goal_opts = ["Vermögensaufbau", "Einkommen/Dividenden", "Kapitalerhalt/Sicherheit", "Spekulation"]
-                goal_sel = st.multiselect("Anlageziel (Mehrfachauswahl)", goal_opts)
+                goal_opts = ["Wealth Accumulation", "Income/Dividends", "Capital Preservation/Security", "Speculation"]
+                goal_sel = st.multiselect("Investment Goal (Multiple Selection)", goal_opts)
 
-            # Age Buckets ableiten
+            # Derive age buckets
             age_bucket_map = {
                 "18-25": (18, 25),
                 "26-35": (26, 35),
@@ -2520,25 +3208,25 @@ if st.session_state.stage == "results":
             genders = gender_sel if gender_sel else None
             goals = goal_sel if goal_sel else None
 
-            # Filtere Daten mit Mehrfachauswahl
+            # Filter data with multiple selection
             filtered_data = filter_peer_data(all_peer_data, age_buckets, goals, genders)
 
             peer_agg = calculate_aggregate_scores(filtered_data)
             
             if peer_agg and peer_agg["count"] > 0:
-                st.success(f"✅ Anzahl an Risk Profilen zum Vergleich: {peer_agg['count']}")
+                st.success(f"✅ Number of Risk Profiles for Comparison: {peer_agg['count']}")
                 
-                # --- Risiko-Vergleich ---
-                st.markdown("#### Risiko-Verlauf (Vergleich)")
+                # --- Risk Comparison ---
+                st.markdown("#### Risk Progression (Comparison)")
                 
                 risk_comparison = pd.DataFrame({
-                    "Marktphase": ["Ruhig", "Boom", "Krise"],
-                    "Du": [
+                    "Market Phase": ["Calm", "Boom", "Crisis"],
+                    "You": [
                         scores["risk_by_phase"].get("calm", 0.5),
                         scores["risk_by_phase"].get("boom", 0.5),
                         scores["risk_by_phase"].get("crisis", 0.5),
                     ],
-                    "Ø Vergleichsgruppe": [
+                    "Ø Comparison Group": [
                         peer_agg["risk_by_phase"]["calm"],
                         peer_agg["risk_by_phase"]["boom"],
                         peer_agg["risk_by_phase"]["crisis"],
@@ -2546,28 +3234,28 @@ if st.session_state.stage == "results":
                 })
                 
                 risk_comp_chart = (
-                    alt.Chart(risk_comparison.melt(id_vars="Marktphase", var_name="Gruppe", value_name="Risiko"))
+                    alt.Chart(risk_comparison.melt(id_vars="Market Phase", var_name="Group", value_name="Risk"))
                     .mark_line(point=True)
                     .encode(
-                        x=alt.X("Marktphase:N", title="Marktphase"),
-                        y=alt.Y("Risiko:Q", title="Risiko (0=vorsichtig, 1=risikofreudig)", scale=alt.Scale(domain=[0, 1])),
-                        color=alt.Color("Gruppe:N", scale=alt.Scale(domain=["Du", "Ø Vergleichsgruppe"], range=[PRIMARY_COLOR, "#9ca3af"])),
-                        strokeDash=alt.StrokeDash("Gruppe:N", scale=alt.Scale(domain=["Du", "Ø Vergleichsgruppe"], range=[0, [5, 5]]))
+                        x=alt.X("Market Phase:N", title="Market Phase"),
+                        y=alt.Y("Risk:Q", title="Risk (0=cautious, 1=risk-seeking)", scale=alt.Scale(domain=[0, 1])),
+                        color=alt.Color("Group:N", scale=alt.Scale(domain=["You", "Ø Comparison Group"], range=[PRIMARY_COLOR, "#9ca3af"])),
+                        strokeDash=alt.StrokeDash("Group:N", scale=alt.Scale(domain=["You", "Ø Comparison Group"], range=[0, [5, 5]]))
                     )
                 )
-                st.altair_chart(risk_comp_chart, use_container_width=True)
+                st.altair_chart(risk_comp_chart, width='stretch')
                 
-                # --- Stress-Vergleich ---
-                st.markdown("#### Stress-Verlauf (Vergleich)")
+                # --- Stress Comparison ---
+                st.markdown("#### Stress Progression (Comparison)")
                 
                 stress_comparison = pd.DataFrame({
-                    "Marktphase": ["Ruhig", "Boom", "Krise"],
-                    "Du": [
+                    "Market Phase": ["Calm", "Boom", "Crisis"],
+                    "You": [
                         scores["stress_by_phase"].get("calm", 0.0),
                         scores["stress_by_phase"].get("boom", 0.0),
                         scores["stress_by_phase"].get("crisis", 0.0),
                     ],
-                    "Ø Vergleichsgruppe": [
+                    "Ø Comparison Group": [
                         peer_agg["stress_by_phase"]["calm"],
                         peer_agg["stress_by_phase"]["boom"],
                         peer_agg["stress_by_phase"]["crisis"],
@@ -2575,42 +3263,64 @@ if st.session_state.stage == "results":
                 })
                 
                 stress_comp_chart = (
-                    alt.Chart(stress_comparison.melt(id_vars="Marktphase", var_name="Gruppe", value_name="Stress"))
+                    alt.Chart(stress_comparison.melt(id_vars="Market Phase", var_name="Group", value_name="Stress"))
                     .mark_line(point=True)
                     .encode(
-                        x=alt.X("Marktphase:N", title="Marktphase"),
+                        x=alt.X("Market Phase:N", title="Market Phase"),
                         y=alt.Y("Stress:Q", title="Stress (z-score)"),
-                        color=alt.Color("Gruppe:N", scale=alt.Scale(domain=["Du", "Ø Vergleichsgruppe"], range=[PRIMARY_COLOR, "#9ca3af"])),
-                        strokeDash=alt.StrokeDash("Gruppe:N", scale=alt.Scale(domain=["Du", "Ø Vergleichsgruppe"], range=[0, [5, 5]]))
+                        color=alt.Color("Group:N", scale=alt.Scale(domain=["You", "Ø Comparison Group"], range=[PRIMARY_COLOR, "#9ca3af"])),
+                        strokeDash=alt.StrokeDash("Group:N", scale=alt.Scale(domain=["You", "Ø Comparison Group"], range=[0, [5, 5]]))
                     )
                 )
-                st.altair_chart(stress_comp_chart, use_container_width=True)
+                st.altair_chart(stress_comp_chart, width='stretch')
                 
-                # --- Kennzahlen-Vergleich ---
-                st.markdown("#### Kennzahlen (Vergleich)")
-                
+                # --- Metrics Comparison ---
+                st.markdown("#### Key Metrics (Comparison)")
+
                 metrics = pd.DataFrame({
-                    "Kennzahl": ["RCS", "SRS", "RGS", "Advisor Need"],
-                    "Du": [scores["RCS"], scores["SRS"], scores["RGS"], scores["AdvisorNeedScore"]],
-                    "Ø Gruppe": [peer_agg["rcs_avg"], peer_agg["srs_avg"], peer_agg["rgs_avg"], peer_agg["ans_avg"]]
+                    "Metric": ["RCS", "SSS", "RGS", "Advisor Need"],
+                    "You": [scores["RCS"], scores["SSS"], scores["RGS"], scores["AdvisorNeedScore"]],
+                    "Ø Group": [peer_agg["rcs_avg"], peer_agg["SSS_avg"], peer_agg["rgs_avg"], peer_agg["ans_avg"]]
                 })
-                
+
                 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-                
+
                 for idx, row in metrics.iterrows():
                     with [col_m1, col_m2, col_m3, col_m4][idx]:
-                        diff = int(row["Du"] - row["Ø Gruppe"])
+                        diff = int(row["You"] - row["Ø Group"])
                         delta_str = f"{diff:+d}" if diff != 0 else "0"
+                        
+                        # RCS & SSS: higher = better → normal (plus green, minus red)
+                        # RGS & Advisor Need: lower = better → inverse (minus green, plus red)
+                        if row["Metric"] in ["RCS", "SSS"]:
+                            delta_color = "normal"
+                        else:
+                            delta_color = "inverse"
+                        
                         st.metric(
-                            row["Kennzahl"],
-                            f"{int(row['Du'])}",
+                            row["Metric"],
+                            f"{int(row['You'])}",
                             delta=delta_str,
-                            delta_color="inverse" if row["Kennzahl"] in ["RCS", "SRS"] else "off"
+                            delta_color=delta_color
                         )
             else:
-                st.warning("❌ Keine Nutzer in der Vergleichsgruppe (zu spezifischer Filter).")
+                st.warning("❌ No users in the comparison group (filter too specific).")
     else:
-        st.info("ℹ️ Nicht genug Daten für Peer-Vergleich verfügbar.")
+        st.info("ℹ️ Not enough data available for peer comparison.")
+    st.markdown("---")
+    st.subheader("10. Export")
 
-    render_footer()
+    stress_summary = {label: float(scores["stress_by_phase"].get(phase, 0.0)) for phase, label in zip(PHASE_ORDER, ["Calm", "Boom", "Crisis"])}
+    risk_summary = {label: float(scores["risk_by_phase"].get(phase, 0.0)) for phase, label in zip(PHASE_ORDER, ["Calm", "Boom", "Crisis"])}
 
+    pdf_bytes = generate_results_pdf(demo, biometrics, stress_summary, risk_summary, scores, risk_type)
+
+    if pdf_bytes:
+        st.download_button(
+            "📄 Export Results as PDF",
+            data=pdf_bytes,
+            file_name="NeuroRiskAI_Report.pdf",
+            mime="application/pdf"
+        )
+    else:
+        st.info("PDF export requires the Python package reportlab.")
