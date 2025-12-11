@@ -2795,7 +2795,7 @@ if st.session_state.stage == "results":
         render_coming_soon_card("Eye Movements", "Coming soon")
 
     # --- Chart 2: Stress Progression ---
-    st.subheader("2. Stress Progression")
+    st.subheader("2. Stress Curve")
     
     # z-score stress per phase (display directly, without 0..1 normalization)
     raw_stress = [scores["stress_by_phase"].get(p, 0.0) for p in PHASE_ORDER]
@@ -2829,7 +2829,7 @@ if st.session_state.stage == "results":
 
 
     # --- Chart 3: Risk Progression (no filter) ---
-    st.subheader("3. Risk Progression")
+    st.subheader("3. Risk Curve")
     risk_df = pd.DataFrame({
         "Market Phase": PHASE_ORDER,
         "Risk (0 = cautious, 1 = risk-seeking)": [scores["risk_by_phase"].get(p, 0.0) for p in PHASE_ORDER]
@@ -3324,3 +3324,4 @@ if st.session_state.stage == "results":
         )
     else:
         st.info("PDF export requires the Python package reportlab.")
+
